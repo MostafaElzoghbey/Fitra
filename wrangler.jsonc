@@ -1,0 +1,18 @@
+{
+  "name": "fitra-lab",
+  "main": "worker/src/index.ts",
+  "compatibility_date": "2026-10-14",
+  "assets": { "directory": "web/dist" },
+  "durable_objects": { "bindings": [{ "name": "CLASSROOM", "class_name": "ClassRoom" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ClassRoom"] }],
+  "vars": {
+    "TRANSLATION_PROVIDER": "fake",    "SUPPORTED_LANGUAGES": ["ar", "en", "fr", "es"],
+    "MAX_STUDENTS": 30,
+    "MAX_TRANSLATION_SESSIONS": 8,
+    "SESSION_IDLE_CLOSE_S": 60,
+    "MAX_ROOM_MINUTES": 120,
+    "AUTO_GRANT": false,
+    "CLASSMATES_HEAR_STUDENT": true,
+    "ROOM_CREATION_DISABLED": false
+  }
+}

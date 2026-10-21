@@ -1,0 +1,17 @@
+{
+  "name": "fitra",
+  "version": "0.0.0",
+  "private": true,
+  "packageManager": "pnpm@10.0.0",
+  "scripts": {
+    "dev": "pnpm --filter ./web dev",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck",
+    "e2e": "npm run build --prefix web && (test -d e2e/node_modules/@playwright/test || npm install --prefix e2e --no-audit --no-fund) && ./e2e/node_modules/.bin/playwright install chromium && ./e2e/node_modules/.bin/playwright test -c e2e/playwright.config.ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "wrangler": "^3.114.0"
+  }
+}

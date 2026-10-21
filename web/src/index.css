@@ -1,0 +1,252 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ------------------------------------------------------------------------- *
+ * Fitra design system — base layer.
+ * Components may only compose the `.ui-*` primitives defined below; raw hex,
+ * ad-hoc spacing and physical `left`/`right` are forbidden (RTL: logical only).
+ * ------------------------------------------------------------------------- */
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    @apply bg-paper font-sans text-ink-900 antialiased;
+  }
+
+  /* Mirror the logical direction for browsers that lack :dir() support. */
+  [dir="rtl"] {
+    text-align: start;
+  }
+
+  ::selection {
+    @apply bg-brand-100 text-brand-900;
+  }
+
+  :focus-visible {
+    @apply outline-none ring-2 ring-brand-500 ring-offset-2 ring-offset-paper;
+  }
+}
+
+@layer components {
+  /* --- surfaces ---------------------------------------------------------- */
+
+  .ui-card {
+    @apply rounded-lg border border-paper-line bg-paper-raised shadow-soft;
+  }
+
+  .ui-card-quiet {
+    @apply rounded-md border border-paper-line bg-paper-sunk;
+  }
+
+  .ui-header {
+    @apply border-b border-paper-line bg-paper-raised/80 backdrop-blur;
+  }
+
+  .ui-header-inner {
+    @apply mx-auto flex w-full max-w-5xl flex-wrap items-center gap-x-6 gap-y-3 px-5 py-4;
+  }
+
+  .ui-page {
+    @apply mx-auto w-full max-w-5xl px-5 py-8 sm:py-12;
+  }
+
+  .ui-page-narrow {
+    @apply mx-auto w-full max-w-2xl px-5 py-8 sm:py-12;
+  }
+
+  /* --- typography ------------------------------------------------------- */
+
+  .ui-title {
+    @apply font-sans text-3xl font-bold leading-tight tracking-tight text-ink-900 sm:text-4xl;
+  }
+
+  .ui-subtitle {
+    @apply font-sans text-lg leading-relaxed text-ink-600;
+  }
+
+  .ui-section-title {
+    @apply font-sans text-sm font-semibold uppercase tracking-widest text-ink-500;
+  }
+
+  .ui-code {
+    @apply font-mono text-2xl font-semibold tracking-[0.35em] text-brand-700;
+  }
+
+  .ui-hint {
+    @apply text-sm leading-relaxed text-ink-500;
+  }
+
+  /* --- controls --------------------------------------------------------- */
+
+  .ui-label {
+    @apply block font-sans text-sm font-semibold text-ink-700;
+  }
+
+  .ui-input {
+    @apply block w-full rounded-md border border-paper-line bg-paper-raised px-3 py-2.5
+           font-sans text-base text-ink-900 shadow-soft transition
+           placeholder:text-ink-400
+           focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/30;
+  }
+
+  .ui-select {
+    @apply block w-full appearance-none rounded-md border border-paper-line bg-paper-raised
+           px-3 py-2.5 font-sans text-base text-ink-900 shadow-soft transition
+           focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/30;
+  }
+
+  .ui-check {
+    @apply flex cursor-pointer items-start gap-3 rounded-md border border-paper-line
+           bg-paper-raised p-4 text-start transition
+           hover:border-brand-300 hover:bg-brand-50/40;
+  }
+
+  .ui-check[data-checked="true"] {
+    @apply border-brand-500 bg-brand-50 ring-1 ring-brand-500;
+  }
+
+  .ui-check input {
+    @apply mt-1 size-5 shrink-0 cursor-pointer accent-brand-600;
+  }
+
+  /* --- buttons ---------------------------------------------------------- */
+
+  .ui-btn {
+    @apply inline-flex select-none items-center justify-center gap-2 rounded-md
+           border border-transparent px-4 py-2.5 font-sans text-sm font-semibold
+           transition duration-150 ease-enter
+           disabled:cursor-not-allowed disabled:opacity-45;
+  }
+
+  .ui-btn-primary {
+    @apply ui-btn bg-brand-600 text-paper-raised shadow-soft
+           hover:bg-brand-700 active:translate-y-px;
+  }
+
+  .ui-btn-secondary {
+    @apply ui-btn border-paper-line bg-paper-raised text-ink-800 shadow-soft
+           hover:border-brand-300 hover:bg-brand-50 active:translate-y-px;
+  }
+
+  .ui-btn-ghost {
+    @apply ui-btn bg-transparent text-ink-600 hover:bg-paper-sunk hover:text-ink-900;
+  }
+
+  .ui-btn-danger {
+    @apply ui-btn bg-danger-500 text-paper-raised shadow-soft hover:bg-danger-700 active:translate-y-px;
+  }
+
+  .ui-btn-live {
+    @apply ui-btn border border-saffron-300 bg-saffron-500 text-paper-raised shadow-live
+           hover:bg-saffron-600 active:translate-y-px;
+  }
+
+  .ui-btn-sm {
+    @apply px-3 py-1.5 text-xs;
+  }
+
+  /* --- chips / badges --------------------------------------------------- */
+
+  .ui-chip {
+    @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-1
+           font-sans text-xs font-semibold;
+  }
+
+  .ui-chip-neutral {
+    @apply ui-chip bg-paper-sunk text-ink-600;
+  }
+
+  .ui-chip-brand {
+    @apply ui-chip bg-brand-50 text-brand-700 ring-1 ring-brand-100;
+  }
+
+  .ui-chip-live {
+    @apply ui-chip bg-saffron-50 text-saffron-700 ring-1 ring-saffron-300;
+  }
+
+  /* --- banners ---------------------------------------------------------- */
+
+  .ui-banner {
+    @apply flex items-start gap-3 rounded-md border p-4 text-sm leading-relaxed;
+  }
+
+  .ui-banner-info {
+    @apply ui-banner border-brand-100 bg-brand-50 text-brand-900;
+  }
+
+  .ui-banner-warn {
+    @apply ui-banner border-saffron-100 bg-saffron-50 text-saffron-700;
+  }
+
+  .ui-banner-danger {
+    @apply ui-banner border-danger-50 bg-danger-50 text-danger-700;
+  }
+
+  /* --- modal ------------------------------------------------------------ */
+
+  .ui-modal-backdrop {
+    @apply fixed inset-0 z-50 flex items-end justify-center bg-ink-900/55 p-0
+           backdrop-blur-sm sm:items-center sm:p-6;
+  }
+
+  .ui-modal {
+    @apply flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden
+           rounded-t-xl border border-paper-line bg-paper-raised shadow-lift sm:rounded-xl;
+  }
+
+  /* --- room ------------------------------------------------------------- */
+
+  .ui-roster-row {
+    @apply flex flex-wrap items-center justify-between gap-3 border-b border-paper-line px-4 py-3 last:border-b-0;
+  }
+
+  .ui-dot-live {
+    @apply size-2.5 shrink-0 rounded-full bg-saffron-500;
+  }
+
+  .ui-dot-idle {
+    @apply size-2.5 shrink-0 rounded-full bg-ink-300;
+  }
+
+  .ui-live-underline {
+    @apply relative overflow-hidden;
+  }
+
+  .ui-live-underline::after {
+    content: "";
+    @apply absolute inset-x-0 bottom-0 h-0.5;
+    background-image: linear-gradient(
+      90deg,
+      transparent 0%,
+      theme("colors.saffron.500") 45%,
+      theme("colors.saffron.300") 55%,
+      transparent 100%
+    );
+    background-size: 200% 100%;
+    @apply animate-sheen;
+  }
+}
+
+@layer utilities {
+  /* Staggered reveal for list/grid children — used by Room + Home. */
+  .stagger > * {
+    animation: rise-in 320ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  }
+  .stagger > *:nth-child(1) { animation-delay: 0ms; }
+  .stagger > *:nth-child(2) { animation-delay: 45ms; }
+  .stagger > *:nth-child(3) { animation-delay: 90ms; }
+  .stagger > *:nth-child(4) { animation-delay: 135ms; }
+  .stagger > *:nth-child(5) { animation-delay: 180ms; }
+  .stagger > *:nth-child(6) { animation-delay: 225ms; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .stagger > *,
+    .ui-live-underline::after {
+      animation: none;
+    }
+  }
+}
