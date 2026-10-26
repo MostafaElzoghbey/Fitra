@@ -27,6 +27,7 @@ import { useUiLang } from "../uiLang.js";
 import { FloorBar } from "../components/FloorBar.js";
 import { Roster } from "../components/Roster.js";
 import { connectRoom, roomSocketUrl, type RoomSocket } from "../net/socket.js";
+import { rejoinRoom } from "../net/api.js";
 import { attachRoomAudio, type RoomAudioHandle } from "../audio/roomShell.js";
 import { captureNoticeKey, type CaptureNotice } from "../audio/devices.js";
 import { navigate, type RoomRouteParams } from "../router.js";
@@ -112,13 +113,59 @@ export function Room({
   const [state, setState] = useState<RoomState>(INITIAL_STATE);
   const [micMuted, setMicMuted] = useState(true);
   const [micNotice, setMicNotice] = useState<CaptureNotice | null>(null);
+  const [token, setToken] = useState(session.token);
   const socketRef = useRef<RoomSocket | null>(null);
   const audioRef = useRef<RoomAudioHandle | null>(null);
+  const tokenRef = useRef(session.token);
+  const rejoinBudgetRef = useRef(3);
+  const rejoiningRef = useRef(false);
+  const lastErrorRef = useRef<string | null>(null);
+
+  // PROTOCOL.md section 1 rejoin: an abnormal socket drop replays the original
+  // token to POST /rooms/:code/rejoin (expiry waived, same pid re-minted) and
+  // reconnects with the fresh token, so membership and floor state survive.
+  // Only terminal join-rejection codes stop auto-rejoin for good; routine
+  // in-room errors (rate-limited, not-your-floor, session-degraded) must not
+  // poison recovery from a later genuine network drop.
+  const terminalErrorCodes: ReadonlySet<string> = new Set([
+    "room-closed",
+    "teacher-taken",
+    "room-full",
+    "unsupported-language",
+    "unauthorized",
+  ]);
+  // Bounded retries with backoff absorb slow-network flaps; the budget resets
+  // on each welcome. The finally clears the in-flight flag even if a retry
+  // throws (unparseable rejoin response), so a later drop can still retry.
+  const attemptRejoin = useCallback(() => {
+    if (rejoiningRef.current || rejoinBudgetRef.current <= 0) return;
+    if (lastErrorRef.current !== null) return;
+    rejoiningRef.current = true;
+    void (async () => {
+      try {
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          rejoinBudgetRef.current -= 1;
+          await new Promise((resolve) => setTimeout(resolve, 400 * 2 ** attempt));
+          const result = await rejoinRoom(session.code, tokenRef.current);
+          if (result.ok) {
+            tokenRef.current = result.value;
+            setToken(result.value);
+            return;
+          }
+          if (result.messageKey !== "errNetwork") {
+            break; // server rejected this membership; reconnecting cannot fix it
+          }
+        }
+      } finally {
+        rejoiningRef.current = false;
+      }
+    })();
+  }, [session.code]);
 
   useEffect(() => {
     const socket = connectRoom(
       roomSocketUrl(session.code, window.location.origin),
-      session.token,
+      token,
       session.name,
     );
     socketRef.current = socket;
@@ -128,10 +175,23 @@ export function Room({
     });
     audioRef.current = audio;
     const offServer = socket.onServer((msg) => {
+      if (msg.t === "welcome") {
+        rejoinBudgetRef.current = 3;
+        lastErrorRef.current = null;
+      } else if (msg.t === "error") {
+        if (terminalErrorCodes.has(msg.code)) {
+          lastErrorRef.current = msg.code;
+        }
+        rejoiningRef.current = false;
+      }
       setState((previous) => reduceServerMsg(previous, msg));
     });
-    const offClose = socket.onClose(() => {
+    const offClose = socket.onClose((info) => {
       setState((previous) => ({ ...previous, connected: false }));
+      // Clean closes are intentional leaves or server-rejected joins (the DO
+      // answers with an error frame first); only abnormal drops rejoin.
+      if (info.wasClean) return;
+      attemptRejoin();
     });
     return () => {
       offServer();
@@ -141,7 +201,7 @@ export function Room({
       socket.close();
       socketRef.current = null;
     };
-  }, [session.code, session.token, session.name]);
+  }, [session.code, token, session.name, attemptRejoin]);
 
   const send = useCallback((msg: ClientMsg) => {
     socketRef.current?.send(msg);

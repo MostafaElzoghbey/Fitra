@@ -231,6 +231,10 @@ describe("ClassRoom floor control via the pure machine (T-007)", () => {
     await teacher.nextOfType("floor-changed");
     await a.nextOfType("floor-changed");
     await b.nextOfType("floor-changed");
+    // Pre-warmed sessions (M0.5) broadcast connecting+live statuses right
+    // after the grant; let their ~0 ms timers land so the quiet windows
+    // below do not race them (quiet() counts raw received length).
+    await new Promise((resolve) => setTimeout(resolve, 30));
 
     // s-b holds no floor: frame dropped, sender told, nobody else hears.
     // The running violation count rides in the message (T-012 metrics hook).

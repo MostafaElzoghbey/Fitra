@@ -93,12 +93,16 @@ function base64ToBytes(b64: string): ArrayBuffer {
 }
 
 /** Parse one server text frame. Returns "audio" payloads via onAudio and
- * reports lifecycle signals. Unknown shapes are ignored (preview API drift). */
+ * reports lifecycle signals. Unknown shapes are ignored (preview API drift).
+ * Transcripts arrive here as RAW fragments; segment accumulation and the
+ * final-on-turn-complete commitment live in the session (OQ-11). */
 export function handleGeminiServerText(
   text: string,
   sink: {
     onAudio: AudioHandler;
     onTranscript?: (kind: "input" | "output", text: string) => void;
+    onTurnComplete?: () => void;
+    onInterrupted?: () => void;
     onSetupComplete: () => void;
     onGoAway?: (timeLeftMs: number) => void;
     onResumption?: (handle: string) => void;
@@ -130,7 +134,13 @@ export function handleGeminiServerText(
     return;
   }
   const content = msg["serverContent"] as
-    | { modelTurn?: { parts?: { inlineData?: { data?: string } }[] }; inputTranscription?: { text?: string }; outputTranscription?: { text?: string } }
+    | {
+        turnComplete?: unknown;
+        interrupted?: unknown;
+        modelTurn?: { parts?: { inlineData?: { data?: string } }[] };
+        inputTranscription?: { text?: string };
+        outputTranscription?: { text?: string };
+      }
     | undefined;
   if (typeof content !== "object" || content === null) return;
   const parts = content.modelTurn?.parts ?? [];
@@ -144,15 +154,29 @@ export function handleGeminiServerText(
   if (typeof content.outputTranscription?.text === "string" && content.outputTranscription.text !== "") {
     sink.onTranscript?.("output", content.outputTranscription.text);
   }
+  if (content.turnComplete === true) {
+    sink.onTurnComplete?.();
+  } else if (content.interrupted === true) {
+    sink.onInterrupted?.();
+  }
 }
 
 type SetupPlacement = "documented" | "toplevel";
+
+/** Frames held while the socket is open-but-not-setup (Gemini drops audio
+ * sent before setupComplete). 5 × 100 ms = 500 ms of speech. */
+export const GEMINI_PRE_LIVE_BUFFER_FRAMES = 5;
 
 class GeminiTranslationSession implements TranslationSession {
   private socket: GeminiSocket | null = null;
   private dead = false;
   private settled = false;
+  private failedEmitted = false;
+  private opened = false;
   private generation = 0;
+  private pendingAudio: ArrayBuffer[] = [];
+  private inputSegment = "";
+  private outputSegment = "";
 
   constructor(
     readonly sourceLang: Lang,
@@ -161,6 +185,32 @@ class GeminiTranslationSession implements TranslationSession {
     private readonly opts: GeminiProviderOptions,
     private readonly ev: TranslationSessionEvents,
   ) {}
+
+  private failOnce(detail: string): void {
+    if (this.failedEmitted || this.dead) return;
+    this.failedEmitted = true;
+    this.dead = true;
+    this.ev.onStatus("failed", detail);
+  }
+
+  private appendTranscript(kind: "input" | "output", text: string): void {
+    if (this.dead) return;
+    const segment =
+      kind === "input" ? (this.inputSegment += text) : (this.outputSegment += text);
+    this.ev.onTranscript?.(kind, segment, false);
+  }
+
+  private commitSegments(): void {
+    if (this.dead) return;
+    if (this.inputSegment !== "") {
+      this.ev.onTranscript?.("input", this.inputSegment, true);
+      this.inputSegment = "";
+    }
+    if (this.outputSegment !== "") {
+      this.ev.onTranscript?.("output", this.outputSegment, true);
+      this.outputSegment = "";
+    }
+  }
 
   async open(): Promise<void> {
     // Probe winner (T-014, 2026-10-15): top-level transcription fields reach
@@ -172,6 +222,7 @@ class GeminiTranslationSession implements TranslationSession {
   private connect(placement: SetupPlacement, retried: boolean): void {
     if (this.dead) return;
     this.generation += 1;
+    this.opened = false;
     const generation = this.generation;
     this.ev.onStatus("connecting");
     const endpoint = this.opts.endpoint ?? GEMINI_LIVE_WS_ENDPOINT;
@@ -195,8 +246,19 @@ class GeminiTranslationSession implements TranslationSession {
         onAudio: (buf) => {
           if (!this.dead) this.ev.onAudio(buf);
         },
-        onTranscript: this.ev.onTranscript,
+        onTranscript: (kind, fragment) => this.appendTranscript(kind, fragment),
+        onTurnComplete: () => this.commitSegments(),
+        onInterrupted: () => this.commitSegments(),
         onSetupComplete: () => {
+          const pending = this.pendingAudio;
+          this.pendingAudio = [];
+          for (const pcm of pending) {
+            try {
+              socket.send(encodeGeminiAudioFrame(pcm));
+            } catch {
+              break;
+            }
+          }
           if (!this.settled) {
             this.settled = true;
             this.ev.onStatus("live");
@@ -240,11 +302,11 @@ class GeminiTranslationSession implements TranslationSession {
         this.connect(placement === "toplevel" ? "documented" : "toplevel", true);
         return;
       }
-      this.ev.onStatus("reconnecting", `gemini-close code=${String(code)}`);
+      this.failOnce(`gemini-close code=${String(code)}`);
     };
     const onError = (): void => {
       if (this.dead || generation !== this.generation || !this.settled) return;
-      this.ev.onStatus("reconnecting", "gemini-socket-error");
+      this.failOnce("gemini-socket-error");
     };
     socket.addEventListener("message", onMessage);
     socket.addEventListener("close", onClose);
@@ -254,6 +316,7 @@ class GeminiTranslationSession implements TranslationSession {
     // setup-send-failed loop in production (T-017).
     const onOpen = (): void => {
       if (this.dead || generation !== this.generation) return;
+      this.opened = true;
       try {
         socket.send(JSON.stringify(buildGeminiSetup(this.targetLang, { placement })));
       } catch {
@@ -271,16 +334,23 @@ class GeminiTranslationSession implements TranslationSession {
         this.connect(placement === "toplevel" ? "documented" : "toplevel", true);
         return;
       }
-      this.ev.onStatus("reconnecting", "gemini-setup-timeout");
+      this.failOnce("gemini-setup-timeout");
     }, 15000);
   }
 
   sendInputAudio(pcm16kMono: ArrayBuffer): void {
     if (this.dead) return;
+    if (!this.opened || !this.settled) {
+      this.pendingAudio.push(pcm16kMono.slice(0));
+      if (this.pendingAudio.length > GEMINI_PRE_LIVE_BUFFER_FRAMES) {
+        this.pendingAudio.shift();
+      }
+      return;
+    }
     try {
       this.socket?.send(encodeGeminiAudioFrame(pcm16kMono));
     } catch {
-      this.ev.onStatus("reconnecting", "gemini-send-failed");
+      this.failOnce("gemini-send-failed");
     }
   }
 
@@ -291,6 +361,7 @@ class GeminiTranslationSession implements TranslationSession {
   close(): void {
     this.dead = true;
     this.generation += 1;
+    this.pendingAudio = [];
     try {
       this.socket?.close();
     } catch {

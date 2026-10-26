@@ -18,6 +18,7 @@ export interface FakeProviderOptions {
   readonly failAfter?: number;
   readonly dropRate?: number;
   readonly tagLanguage?: boolean;
+  readonly emitTranscripts?: boolean;
 }
 
 type Timer = ReturnType<typeof setTimeout>;
@@ -47,6 +48,7 @@ export class FakeTranslationSession implements TranslationSession {
   private readonly failAfter: number | undefined;
   private readonly dropRate: number;
   private readonly tagLanguage: boolean;
+  private readonly emitTranscripts: boolean;
   private readonly onSessionClosed: (s: FakeTranslationSession) => void;
 
   private sendCount = 0;
@@ -63,6 +65,7 @@ export class FakeTranslationSession implements TranslationSession {
       readonly failAfter: number | undefined;
       readonly dropRate: number;
       readonly tagLanguage: boolean;
+      readonly emitTranscripts: boolean;
     },
     onSessionClosed: (s: FakeTranslationSession) => void,
   ) {
@@ -73,6 +76,7 @@ export class FakeTranslationSession implements TranslationSession {
     this.failAfter = options.failAfter;
     this.dropRate = options.dropRate;
     this.tagLanguage = options.tagLanguage;
+    this.emitTranscripts = options.emitTranscripts;
     this.onSessionClosed = onSessionClosed;
   }
 
@@ -97,6 +101,13 @@ export class FakeTranslationSession implements TranslationSession {
       return;
     }
     if (Math.random() < this.dropRate) return;
+    const sendIndex = this.sendCount;
+    if (this.emitTranscripts) {
+      // Synthetic transcript pair (one per accepted send) so DO caption
+      // routing is testable end-to-end; real captions come from Gemini
+      // segments only, and this emission is opt-in via FAKE_EMIT_TRANSCRIPTS.
+      this.ev.onTranscript?.("input", `in${sendIndex}`, false);
+    }
     // Copy at send time so later caller mutation cannot corrupt the echo.
     const snapshot: ArrayBuffer = pcm16kMono.slice(0);
     const out: ArrayBuffer = this.tagLanguage ? withTag(snapshot, this.targetLang) : snapshot;
@@ -104,6 +115,9 @@ export class FakeTranslationSession implements TranslationSession {
       this.pending.delete(t);
       if (this.closed || this.failed) return;
       this.ev.onAudio(out.slice(0));
+      if (this.emitTranscripts) {
+        this.ev.onTranscript?.("output", `out${sendIndex}`, false);
+      }
     }, this.delayMs);
     this.pending.add(t);
   }
@@ -158,6 +172,7 @@ export class FakeTranslationProvider implements TranslationProvider {
   private readonly failAfter: number | undefined;
   private readonly dropRate: number;
   private readonly tagLanguage: boolean;
+  private readonly emitTranscripts: boolean;
   private readonly sessions: Set<FakeTranslationSession> = new Set();
 
   constructor(options: FakeProviderOptions = {}) {
@@ -181,6 +196,7 @@ export class FakeTranslationProvider implements TranslationProvider {
     this.failAfter = options.failAfter;
     this.dropRate = dropRate;
     this.tagLanguage = options.tagLanguage ?? false;
+    this.emitTranscripts = options.emitTranscripts ?? false;
   }
 
   openSession(
@@ -197,6 +213,7 @@ export class FakeTranslationProvider implements TranslationProvider {
         failAfter: this.failAfter,
         dropRate: this.dropRate,
         tagLanguage: this.tagLanguage,
+        emitTranscripts: this.emitTranscripts,
       },
       (s: FakeTranslationSession) => {
         this.sessions.delete(s);

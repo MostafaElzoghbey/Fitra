@@ -82,3 +82,35 @@ export async function joinRoom(
   }
   return { ok: true, value: body["token"] };
 }
+
+// POST /rooms/:code/rejoin (PROTOCOL.md section 1): replays the ORIGINAL join
+// token so the endpoint can waive expiry and re-mint the SAME pid — a dropped
+// socket resumes its seat without a fresh join.
+export async function rejoinRoom(
+  code: string,
+  token: string,
+): Promise<ApiResult<string>> {
+  let response: Response;
+  try {
+    response = await fetch(`/rooms/${encodeURIComponent(code)}/rejoin`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token }),
+    });
+  } catch {
+    return { ok: false, messageKey: "errNetwork" };
+  }
+  if (!response.ok) {
+    return { ok: false, messageKey: errorMessageKey(await readErrorCode(response)) };
+  }
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    return { ok: false, messageKey: "errServer" };
+  }
+  if (!isRecord(body) || typeof body["token"] !== "string" || body["token"] === "") {
+    return { ok: false, messageKey: "errServer" };
+  }
+  return { ok: true, value: body["token"] };
+}

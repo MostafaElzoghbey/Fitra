@@ -86,9 +86,9 @@ end to end as early as possible.
 ### 4.3 Translation routing
 
 - **FR-020** Translation sessions are keyed by
-  `(sourceLanguage → targetLanguage)`, created lazily, shared by all listeners
-  needing that target language, reference-counted, closed after an idle
-  timeout (default 60 s, configurable).
+  `(sourceLanguage → targetLanguage)`, pre-warmed at floor grant then
+  shared by all listeners needing that target language, reference-counted,
+  closed after an idle timeout (default 60 s, configurable).
 - **FR-021** Same-language listener: relay the original audio untouched — no
   translation session, no Gemini cost.
 - **FR-022** Teacher speaks → one session per distinct student language.
@@ -124,10 +124,12 @@ end to end as early as possible.
   "unmute/enable audio" resumes the context; mic permission denial shows a
   blocking hint with retry; device selection exposed via `enumerateDevices`;
   UI recommends headphones to avoid echo.
-- **FR-034** Captions/transcripts ship ONLY if the API returns them
-  (`inputAudioTranscription` / `outputAudioTranscription` are documented
-  fields — placement uncertain, see OQ-01). Otherwise captions stay an open
-  question (M3).
+- **FR-034** Captions/transcripts ship as `caption{kind, text, final}` frames
+  when the engine returns them (`inputAudioTranscription` /
+  `outputAudioTranscription` top-level placement probe-confirmed, see
+  OQ-01). Routing: `output` and `input` captions both go to the pair's
+  target-language sockets (PROTOCOL.md section 3.1). Memory only — no
+  caption data is ever persisted.
 
 ### 4.5 Debug / metrics panel (M0)
 

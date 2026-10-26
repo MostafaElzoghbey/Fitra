@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FakeTranslationProvider } from "../src/translation/fake.js";
 import type {
   Lang,
+  TranslationProvider,
   TranslationSession,
   TranslationSessionEvents,
 } from "../src/translation/provider.js";
@@ -206,5 +207,130 @@ describe("SessionManager (T-008)", () => {
     // signalling here; the exhaustion test above covers repeated failure.
     expect(got.degraded).toBe(false);
     expect(audio).toHaveLength(0);
+  });
+});
+
+/** Provider whose session emits nothing on its own; the test drives
+ * `events.onTranscript` / `events.onGoAway` / `events.onStatus` directly. */
+class ScriptedProvider implements TranslationProvider {
+  readonly name = "fake" as const;
+  events: TranslationSessionEvents | null = null;
+  closedAll = false;
+
+  openSession(
+    sourceLang: Lang,
+    targetLang: Lang,
+    ev: TranslationSessionEvents,
+  ): Promise<TranslationSession> {
+    this.events = ev;
+    const session: TranslationSession = {
+      sourceLang,
+      targetLang,
+      sendInputAudio: (): void => undefined,
+      endInput: (): void => undefined,
+      close: (): void => undefined,
+    };
+    return Promise.resolve(session);
+  }
+
+  closeAll(): Promise<void> {
+    this.closedAll = true;
+    return Promise.resolve();
+  }
+}
+
+describe("SessionManager transcript + goAway forwarding (latency/quality M0.5)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("forwards provider transcripts with pair, kind, full-segment text and final flag", async () => {
+    const provider = new ScriptedProvider();
+    const transcripts: Array<{
+      pair: string;
+      kind: "input" | "output";
+      text: string;
+      final: boolean;
+    }> = [];
+    const manager = new SessionManager(provider, {
+      onTranscript: (pair, kind, text, final) => {
+        transcripts.push({ pair, kind, text, final });
+      },
+    });
+    manager.acquire("ar", "en", "listener-1", { isTeacherLeg: false });
+    const ev = provider.events;
+    if (ev === null) throw new Error("provider never got events");
+    ev.onTranscript?.("output", "hello world", false);
+    ev.onTranscript?.("input", "مرحبا", true);
+    expect(transcripts).toEqual([
+      { pair: "ar->en", kind: "output", text: "hello world", final: false },
+      { pair: "ar->en", kind: "input", text: "مرحبا", final: true },
+    ]);
+  });
+
+  it("drops transcript/goAway events after the entry is torn down (stale generation)", async () => {
+    const provider = new ScriptedProvider();
+    const transcripts: unknown[] = [];
+    const goAways: unknown[] = [];
+    const manager = new SessionManager(provider, {
+      onTranscript: (pair) => {
+        transcripts.push(pair);
+      },
+      onGoAway: (pair) => {
+        goAways.push(pair);
+      },
+    });
+    manager.acquire("ar", "en", "listener-1", { isTeacherLeg: false });
+    const ev = provider.events;
+    if (ev === null) throw new Error("provider never got events");
+    await manager.closeAll();
+    ev.onTranscript?.("output", "late", false);
+    ev.onGoAway?.(45_000);
+    expect(transcripts).toEqual([]);
+    expect(goAways).toEqual([]);
+  });
+
+  it("forwards goAway with pair and remaining time", async () => {
+    const provider = new ScriptedProvider();
+    const goAways: Array<{ pair: string; ms: number }> = [];
+    const manager = new SessionManager(provider, {
+      onGoAway: (pair, ms) => {
+        goAways.push({ pair, ms });
+      },
+    });
+    manager.acquire("ar", "fr", "listener-1", { isTeacherLeg: false });
+    const ev = provider.events;
+    if (ev === null) throw new Error("provider never got events");
+    ev.onGoAway?.(60_000);
+    expect(goAways).toEqual([{ pair: "ar->fr", ms: 60_000 }]);
+  });
+
+  it("resets retry attempts once a live session proves stable (>10s), keeping rapid-fail exhaustion", async () => {
+    // failAfter=1: every underlying session dies on its first send.
+    const provider = new CountingFake({ delayMs: 5, failAfter: 1 });
+    const { manager, events } = makeManager(provider);
+    const got = manager.acquire("ar", "en", "listener-1", { isTeacherLeg: false });
+    await vi.advanceTimersByTimeAsync(10);
+
+    // Drop #1 happens 10ms after live: NOT stable, attempt counter keeps
+    // climbing (rapid-fail exhaustion is preserved).
+    got.session.sendInputAudio(new Uint8Array([1]).buffer as ArrayBuffer);
+    await vi.advanceTimersByTimeAsync(250 + 10); // backoff 1 -> open #2, live
+    got.session.sendInputAudio(new Uint8Array([2]).buffer as ArrayBuffer);
+    await vi.advanceTimersByTimeAsync(500 + 10); // backoff 2 -> open #3, live
+    expect(events.filter((e) => e.status === "reconnecting").map((e) => e.attempt)).toEqual([1, 2]);
+
+    // Now let the third session live for >10s (it cannot fail on its own:
+    // failAfter only fires on send), then fail it: the counter resets.
+    await vi.advanceTimersByTimeAsync(11_000);
+    got.session.sendInputAudio(new Uint8Array([3]).buffer as ArrayBuffer);
+    await vi.advanceTimersByTimeAsync(250 + 10); // backoff restarts at 1
+    expect(events.filter((e) => e.status === "reconnecting").map((e) => e.attempt)).toEqual([
+      1, 2, 1,
+    ]);
+    expect(provider.openCalls).toBe(4);
   });
 });

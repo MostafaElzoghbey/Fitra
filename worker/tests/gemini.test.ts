@@ -70,13 +70,13 @@ class FakeGeminiSocket implements GeminiSocket {
 function collect() {
   const audio: ArrayBuffer[] = [];
   const status: Array<{ s: string; detail?: string }> = [];
-  const transcripts: Array<{ kind: string; text: string }> = [];
+  const transcripts: Array<{ kind: string; text: string; final: boolean }> = [];
   const ev: TranslationSessionEvents = {
     onAudio: (pcm) => {
       audio.push(pcm.slice(0));
     },
-    onTranscript: (kind, text) => {
-      transcripts.push({ kind, text });
+    onTranscript: (kind, text, final) => {
+      transcripts.push({ kind, text, final });
     },
     onStatus: (s, detail) => {
       status.push({ s, detail });
@@ -279,6 +279,160 @@ describe("GeminiTranslationProvider (T-015)", () => {
     sockets[0]?.serverOpen();
     sockets[0]?.serverBinaryText({ setupComplete: {} });
     expect(c.status.map((entry) => entry.s)).toEqual(["connecting", "live"]);
+    session.close();
+    await provider.closeAll();
+  });
+
+  it("emits failed exactly once when a settled socket closes (was: reconnecting forever)", async () => {
+    const sockets: FakeGeminiSocket[] = [];
+    const provider = new GeminiTranslationProvider("test-key", {
+      createSocket: (url) => {
+        const socket = new FakeGeminiSocket(url);
+        sockets.push(socket);
+        return socket;
+      },
+    });
+    const c = collect();
+    const session = await provider.openSession("ar", "en", c.ev);
+    sockets[0]?.serverOpen();
+    sockets[0]?.serverText({ setupComplete: {} });
+    expect(c.status.map((e) => e.s)).toEqual(["connecting", "live"]);
+
+    sockets[0]?.serverClose(1011);
+    expect(c.status.map((e) => e.s)).toEqual(["connecting", "live", "failed"]);
+
+    // A late send after failure emits no further status (the manager owns retry).
+    session.sendInputAudio(new Uint8Array([1]).buffer as ArrayBuffer);
+    expect(c.status.map((e) => e.s)).toEqual(["connecting", "live", "failed"]);
+    session.close();
+    await provider.closeAll();
+  });
+
+  it("emits failed exactly once for repeated failure signals after setupComplete", async () => {
+    const sockets: FakeGeminiSocket[] = [];
+    const provider = new GeminiTranslationProvider("test-key", {
+      createSocket: (url) => {
+        const socket = new FakeGeminiSocket(url);
+        sockets.push(socket);
+        return socket;
+      },
+    });
+    const c = collect();
+    const session = await provider.openSession("ar", "en", c.ev);
+    sockets[0]?.serverOpen();
+    sockets[0]?.serverText({ setupComplete: {} });
+    sockets[0]?.serverClose(1006);
+    expect(c.status.filter((e) => e.s === "failed")).toHaveLength(1);
+    session.sendInputAudio(new Uint8Array([1]).buffer as ArrayBuffer);
+    expect(c.status.filter((e) => e.s === "failed")).toHaveLength(1);
+    session.close();
+    await provider.closeAll();
+  });
+
+  it("buffers pre-live audio, flushes in order on setupComplete, caps at 5 frames", async () => {
+    const sockets: FakeGeminiSocket[] = [];
+    const provider = new GeminiTranslationProvider("test-key", {
+      createSocket: (url) => {
+        const socket = new FakeGeminiSocket(url);
+        sockets.push(socket);
+        return socket;
+      },
+    });
+    const c = collect();
+    const session = await provider.openSession("ar", "en", c.ev);
+
+    // 8 frames before the socket even opens: nothing sent, no status noise.
+    const payloads: number[][] = [];
+    for (let i = 0; i < 8; i += 1) {
+      const payload = [i, i];
+      payloads.push(payload);
+      session.sendInputAudio(new Uint8Array(payload).buffer as ArrayBuffer);
+    }
+    expect(sockets[0]?.sent).toHaveLength(0);
+    expect(c.status.map((e) => e.s)).toEqual(["connecting"]);
+
+    sockets[0]?.serverOpen();
+    expect(sockets[0]?.sent).toHaveLength(1); // setup only
+    sockets[0]?.serverText({ setupComplete: {} });
+    expect(c.status.map((e) => e.s)).toEqual(["connecting", "live"]);
+
+    // Last 5 buffered frames flush in order ahead of nothing else.
+    const audioFrames = (sockets[0] as FakeGeminiSocket).sent.slice(1).map((raw) => {
+      const parsed = JSON.parse(raw) as { realtimeInput: { audio: { data: string } } };
+      return Array.from(atob(parsed.realtimeInput.audio.data), (ch) => ch.charCodeAt(0));
+    });
+    expect(audioFrames).toEqual(payloads.slice(3));
+    session.close();
+    await provider.closeAll();
+  });
+
+  it("accumulates transcript fragments per kind and commits final on turnComplete", async () => {
+    const sockets: FakeGeminiSocket[] = [];
+    const provider = new GeminiTranslationProvider("test-key", {
+      createSocket: (url) => {
+        const socket = new FakeGeminiSocket(url);
+        sockets.push(socket);
+        return socket;
+      },
+    });
+    const c = collect();
+    const session = await provider.openSession("ar", "en", c.ev);
+    sockets[0]?.serverOpen();
+    sockets[0]?.serverText({ setupComplete: {} });
+    c.transcripts.length = 0;
+
+    sockets[0]?.serverText({
+      serverContent: { inputTranscription: { text: "مر" }, outputTranscription: { text: "hel" } },
+    });
+    sockets[0]?.serverText({
+      serverContent: { inputTranscription: { text: "حبا" }, outputTranscription: { text: "lo" } },
+    });
+    expect(c.transcripts).toEqual([
+      { kind: "input", text: "مر", final: false },
+      { kind: "output", text: "hel", final: false },
+      { kind: "input", text: "مرحبا", final: false },
+      { kind: "output", text: "hello", final: false },
+    ]);
+
+    sockets[0]?.serverText({ serverContent: { turnComplete: true } });
+    expect(c.transcripts.slice(-2)).toEqual([
+      { kind: "input", text: "مرحبا", final: true },
+      { kind: "output", text: "hello", final: true },
+    ]);
+
+    // The next turn starts fresh.
+    sockets[0]?.serverText({ serverContent: { inputTranscription: { text: "new" } } });
+    expect(c.transcripts[c.transcripts.length - 1]).toEqual({
+      kind: "input",
+      text: "new",
+      final: false,
+    });
+    session.close();
+    await provider.closeAll();
+  });
+
+  it("commits the partial segment as final when the turn is interrupted", async () => {
+    const sockets: FakeGeminiSocket[] = [];
+    const provider = new GeminiTranslationProvider("test-key", {
+      createSocket: (url) => {
+        const socket = new FakeGeminiSocket(url);
+        sockets.push(socket);
+        return socket;
+      },
+    });
+    const c = collect();
+    const session = await provider.openSession("ar", "en", c.ev);
+    sockets[0]?.serverOpen();
+    sockets[0]?.serverText({ setupComplete: {} });
+    c.transcripts.length = 0;
+
+    sockets[0]?.serverText({
+      serverContent: { outputTranscription: { text: "partial" }, interrupted: true },
+    });
+    expect(c.transcripts).toEqual([
+      { kind: "output", text: "partial", final: false },
+      { kind: "output", text: "partial", final: true },
+    ]);
     session.close();
     await provider.closeAll();
   });

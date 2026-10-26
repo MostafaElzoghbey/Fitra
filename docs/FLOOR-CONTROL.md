@@ -42,7 +42,13 @@ Related server data (not states): `raisedHands: pid[]` (FIFO queue),
   speaker as source are released; listeners hear silence (no filler audio).
 - **Teacher disconnects**: translation stops (no source), room state retained
   in DO memory/SQLite; on teacher rejoin (same room code + `teacher` role +
-  valid token) state resumes at IDLE.
+  valid token) state resumes at IDLE. A teacher REPLACING their own socket
+  (rejoin endpoint) broadcasts `floor-changed{none, teacher-rejoin}` so
+  clients resync; it must never surface `error{teacher-taken}`, and the
+  replaced socket's close cannot evict the live membership row.
+- **Floor grant pre-warms translation**: the grant effect opens the pair set
+  eagerly (see `ARCHITECTURE.md` section 4), so the first spoken frame does
+  not pay the session-opening gap.
 - **Grant to absent pid**: `error` to teacher, no state change.
 - **Revoke with IDLE floor**: no-op, still broadcast (keeps clients in sync).
 - **Self-hearing**: never — the DO excludes the speaker's own socket from

@@ -28,11 +28,22 @@ export type SessionStatusCallback = (
 /** Audio sink per pair; T-009 fans these chunks out to listeners. */
 export type SessionAudioCallback = (pair: string, pcm: ArrayBuffer) => void;
 
+export type SessionTranscriptCallback = (
+  pair: string,
+  kind: "input" | "output",
+  text: string,
+  final: boolean,
+) => void;
+
+export type SessionGoAwayCallback = (pair: string, timeLeftMs: number) => void;
+
 export interface SessionManagerOptions {
   readonly maxSessions?: number;
   readonly idleCloseMs?: number;
   readonly onSessionStatus?: SessionStatusCallback;
   readonly onAudio?: SessionAudioCallback;
+  readonly onTranscript?: SessionTranscriptCallback;
+  readonly onGoAway?: SessionGoAwayCallback;
 }
 
 export interface AcquireOptions {
@@ -49,6 +60,10 @@ export const DEFAULT_IDLE_CLOSE_MS = 60_000;
 export const MAX_RECONNECT_ATTEMPTS = 5;
 const RECONNECT_BASE_MS = 250;
 const RECONNECT_CAP_MS = 5_000;
+/** Gemini caps connections (~10 min) and random 500s/1006s happen; a session
+ * that survives this long counts as proven-stable, so the retry budget resets
+ * (rapid-fail exhaustion within 10 s still terminates the pair). */
+const STABLE_LIVE_RESET_MS = 10_000;
 
 export function pairKey(sourceLang: Lang, targetLang: Lang): string {
   return `${sourceLang}->${targetLang}`;
@@ -139,6 +154,8 @@ interface SessionEntry {
   attempts: number;
   terminallyFailed: boolean;
   opening: boolean;
+  /** Wall-clock time of the latest "live" status; null while not live. */
+  liveSinceMs: number | null;
   readonly handle: ManagedSession;
   underlying: TranslationSession | null;
   /** Bumped per open so stale event callbacks / late resolves are ignored. */
@@ -160,6 +177,8 @@ export class SessionManager {
   private readonly idleCloseMs: number;
   private readonly onSessionStatus: SessionStatusCallback | undefined;
   private readonly onAudio: SessionAudioCallback | undefined;
+  private readonly onTranscript: SessionTranscriptCallback | undefined;
+  private readonly onGoAway: SessionGoAwayCallback | undefined;
   private readonly entries = new Map<string, SessionEntry>();
   private createdCounter = 0;
 
@@ -181,6 +200,8 @@ export class SessionManager {
     this.idleCloseMs = idleCloseMs;
     this.onSessionStatus = options.onSessionStatus;
     this.onAudio = options.onAudio;
+    this.onTranscript = options.onTranscript;
+    this.onGoAway = options.onGoAway;
   }
 
   /** Live (non-degraded) pair count — for the metrics panel (FR-040). */
@@ -233,6 +254,7 @@ export class SessionManager {
       attempts: 0,
       terminallyFailed: false,
       opening: false,
+      liveSinceMs: null,
       handle: new ManagedSession(sourceLang, targetLang),
       underlying: null,
       generation: 0,
@@ -317,11 +339,22 @@ export class SessionManager {
         if (!this.isCurrent(entry, gen)) return;
         this.onAudio?.(entry.key, pcm);
       },
+      onTranscript: (kind, text, final) => {
+        if (!this.isCurrent(entry, gen)) return;
+        this.onTranscript?.(entry.key, kind, text, final);
+      },
+      onGoAway: (timeLeftMs) => {
+        if (!this.isCurrent(entry, gen)) return;
+        this.onGoAway?.(entry.key, timeLeftMs);
+      },
       onStatus: (s: ProviderLiveStatus | "failed") => {
         if (!this.isCurrent(entry, gen)) return;
         if (s === "failed") {
           this.scheduleRetry(entry);
           return;
+        }
+        if (s === "live") {
+          entry.liveSinceMs = Date.now();
         }
         this.emit(entry.key, s, entry.attempts);
       },
@@ -329,6 +362,10 @@ export class SessionManager {
   }
 
   private scheduleRetry(entry: SessionEntry): void {
+    if (entry.liveSinceMs !== null && Date.now() - entry.liveSinceMs >= STABLE_LIVE_RESET_MS) {
+      entry.attempts = 0;
+    }
+    entry.liveSinceMs = null;
     if (entry.attempts >= MAX_RECONNECT_ATTEMPTS) {
       entry.terminallyFailed = true;
       entry.underlying = null;

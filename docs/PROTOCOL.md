@@ -10,6 +10,13 @@ M0-stable: M2 auth mints the same join token claims without changing it (FR-003)
   name (see section 4), so the display name travels next to the token; the DO
   falls back to `pid` when it is absent and truncates it to 64 chars. M2 moves
   the name into the token claims — no message shape changes either way.
+- **Rejoin**: `POST /rooms/:code/rejoin { token }` re-signs the SAME claims
+  (same `pid`/`role`/`lang`) with a fresh `iat`/`exp`, so a client can rebuild
+  its socket after a drop without changing identity (a stale socket that
+  lingers is closed by the DO as `rejoined`). The old token's signature must
+  verify — expiry is waived, but room match, role and language are not, and
+  the token must still be signed by the same secret. Normal `/join` keeps its
+  strict 10-minute expiry and mints a fresh `pid`.
 - **Binary frames** = audio. **Text frames** = JSON control (type-tagged).
 - DO validates the token during upgrade; invalid → HTTP 401, never 101.
 - A token that verifies but cannot be admitted (second teacher, room full,
@@ -59,7 +66,7 @@ type ServerMsg =
   | { t: "floor-changed"; floor: FloorHolder; reason: string }
   | { t: "hands"; raised: string[] }   // participantIds, teacher only sees full list; students see count
   | { t: "session-status"; pair: string; status: "connecting" | "live" | "reconnecting" | "failed" | "degraded"; attempt?: number }
-  | { t: "caption"; kind: "input" | "output"; text: string; final: boolean } // ONLY if engine yields transcripts
+  | { t: "caption"; kind: "input" | "output"; text: string; final: boolean }
   | { t: "metrics"; m: RoomMetrics }
   | { t: "error"; code: string; message: string }
   | { t: "pong"; id: number };
@@ -87,7 +94,27 @@ holding the floor; no state change). The `not-implemented-*` codes are M0
 scaffolding: they exist so an unimplemented path
 reports itself instead of dropping input silently (NFR-001).
 
-## 3.1 Roster synchronisation
+### 3.1 Caption semantics (emitted when the engine yields transcripts)
+
+- `text` is the **full current segment** so far for one turn of one kind, not
+  a delta: the client replaces its live segment on every
+  `caption{final:false}` and commits it to history on `caption{final:true}`.
+- `final:true` is emitted exactly once per turn (on the engine's turn-complete
+  signal); every earlier emission for that turn carries `final:false`. An
+  interrupted turn commits its partial segment as `final:true` rather than
+  sending an empty final.
+- Routing is per translation pair, never broadcast: both `output` captions
+  (translated text) and `input` captions (source-speech transcription) go
+  only to live sockets whose membership `lang` equals the pair's target
+  language. The source speaker and same-language listeners are excluded
+  automatically — a pair's target always differs from its source, and
+  same-language listeners receive the un-relayed audio instead.
+- A listener belongs to exactly one pair at a time (their own language vs the
+  current speaker's), so each listener receives at most one input and one
+  output caption stream per turn. No caption data is persisted anywhere
+  (memory only, AGENTS.md rule 2).
+
+## 3.2 Roster synchronisation
 
 `welcome` doubles as the roster-sync frame — there is no separate roster
 message. Sent once to a joining participant and again to every *other*
@@ -110,6 +137,11 @@ The DO treats `claims.room` as authoritative and rejects (401) a token whose
 room differs from the DO instance name, `claims.role` as authoritative for
 capacity checks, and `claims.lang` as authoritative against
 `SUPPORTED_LANGUAGES` (FR-007).
+
+The rejoin endpoint (section 1) verifies the signature, room, role and lang of
+the presented token while waiving only the expiry check — the DO's live
+membership (same `pid`, seat replacement) remains the authority on whether the
+rejoin is admitted. It then re-signs the same claims with fresh `iat`/`exp`.
 
 ## 5. Rate limits (defaults, configurable)
 

@@ -47,13 +47,18 @@ import {
 } from "./floor.js";
 import { FakeTranslationProvider } from "./translation/fake.js";
 import { GeminiTranslationProvider } from "./translation/gemini.js";
-import type { TranslationProvider } from "./translation/provider.js";
-import { upsample16kTo24kMono } from "./resample.js";
 import {
+  DEFAULT_IDLE_CLOSE_MS,
+  DEFAULT_MAX_SESSIONS,
   pairKey,
   SessionManager,
   type SessionStatus,
 } from "./translation/sessions.js";
+import { upsample16kTo24kMono } from "./resample.js";
+import type {
+  TranslationProvider,
+  TranslationSession,
+} from "./translation/provider.js";
 
 export interface RoomEnv {
   readonly JOIN_TOKEN_HMAC_SECRET?: string;
@@ -62,6 +67,9 @@ export interface RoomEnv {
   readonly SUPPORTED_LANGUAGES?: readonly string[] | string;
   readonly TRANSLATION_PROVIDER?: string;
   readonly GEMINI_API_KEY?: string;
+  readonly MAX_TRANSLATION_SESSIONS?: number | string;
+  readonly SESSION_IDLE_CLOSE_S?: number | string;
+  readonly FAKE_EMIT_TRANSCRIPTS?: boolean | string;
 }
 
 /** FR-006 default allowlist; mirrors `DEFAULT_SUPPORTED_LANGUAGES` in index.ts. */
@@ -369,6 +377,7 @@ export class ClassRoom {
         "DELETE FROM membership WHERE participant_id = ?",
         member.pid,
       );
+      this.invalidateMemberLangs();
       this.sessions?.release(member.pid);
       this.audioStamps.delete(member.pid);
       this.controlStamps.delete(member.pid);
@@ -414,7 +423,10 @@ export class ClassRoom {
     }
     switch (parsed.t) {
       case "ping":
-        ws.send(JSON.stringify({ t: "pong", id: parsed.id } satisfies ServerMsg));
+        this.trySend(
+          ws,
+          JSON.stringify({ t: "pong", id: parsed.id } satisfies ServerMsg),
+        );
         return;
       case "speaking-start": {
         if (member.role === "teacher") {
@@ -570,7 +582,7 @@ export class ClassRoom {
             floor: broadcast.floor,
             reason: broadcast.reason,
           } satisfies ServerMsg);
-          for (const { ws } of this.liveSockets()) ws.send(msg);
+          for (const { ws } of this.liveSockets()) this.trySend(ws, msg);
           break;
         }
         case "hands": {
@@ -578,7 +590,7 @@ export class ClassRoom {
             t: "hands",
             raised: broadcast.raised,
           } satisfies ServerMsg);
-          for (const { ws } of this.liveSockets()) ws.send(msg);
+          for (const { ws } of this.liveSockets()) this.trySend(ws, msg);
           break;
         }
         case "error": {
@@ -621,7 +633,11 @@ export class ClassRoom {
         }
         case "pauseTranslation":
         case "resumeTranslation":
+          break;
         case "ensureSession":
+          // Floor grant opens the pair set eagerly so the first spoken frame
+          // does not pay the session-opening gap (PROTOCOL section 4.1).
+          this.prewarmSessions(effect.source);
           break;
         default: {
           const _exhaustive: never = effect;
@@ -725,26 +741,55 @@ export class ClassRoom {
         return null;
       }
     } else {
-      provider = new FakeTranslationProvider();
+      provider = new FakeTranslationProvider({
+        emitTranscripts:
+          this.env.FAKE_EMIT_TRANSCRIPTS === true ||
+          this.env.FAKE_EMIT_TRANSCRIPTS === "1",
+      });
     }
     this.sessions = new SessionManager(provider, {
+      maxSessions: parseCount(
+        this.env.MAX_TRANSLATION_SESSIONS,
+        DEFAULT_MAX_SESSIONS,
+        1,
+      ),
+      idleCloseMs:
+        parseCount(
+          this.env.SESSION_IDLE_CLOSE_S,
+          DEFAULT_IDLE_CLOSE_MS / 1000,
+          0,
+        ) * 1000,
       onSessionStatus: (pair, status, attempt) => {
         this.broadcastSessionStatus(pair, status, attempt);
       },
       onAudio: (pair, pcm) => {
         this.forwardTranslated(pair, pcm);
       },
+      onTranscript: (pair, kind, text, final) => {
+        this.broadcastCaption(pair, kind, text, final);
+      },
     });
     return this.sessions;
   }
 
+  private memberLangsCache: Map<string, string> | null = null;
+
+  /** Fan-out used to re-query membership per 100 ms frame (and again per
+   * translated chunk, 2 SQLite reads/frame); cached until any row changes. */
+  private invalidateMemberLangs(): void {
+    this.memberLangsCache = null;
+  }
+
   /** pid -> join language for every membership row (read-only, no writes). */
   private memberLangs(): Map<string, string> {
+    const cached = this.memberLangsCache;
+    if (cached !== null) return cached;
     const langs = new Map<string, string>();
     const rows = this.state.storage.sql
       .exec<MemberRow>("SELECT participant_id, role, name, lang FROM membership")
       .toArray();
     for (const row of rows) langs.set(row.participant_id, row.lang);
+    this.memberLangsCache = langs;
     return langs;
   }
 
@@ -764,57 +809,111 @@ export class ClassRoom {
       payload.byteOffset,
       payload.byteOffset + payload.byteLength,
     ) as ArrayBuffer;
-    for (const { ws, member } of this.liveSockets()) {
-      if (member.pid === holder.pid) continue;
-      const targetLang = langs.get(member.pid);
+    // Group translation listeners per pair: a pair's uplink must be fed ONCE
+    // per frame regardless of listener count — feeding it once per listener
+    // garbles streaming transcription and multiplies speaker turns.
+    const membersByLang = new Map<string, LiveSocket[]>();
+    for (const entry of this.liveSockets()) {
+      if (entry.member.pid === holder.pid) continue;
+      const targetLang = langs.get(entry.member.pid);
       if (targetLang === undefined) continue;
       if (targetLang === sourceLang) {
-        // Same-language relay (FR-021, no translation session): the uplink
-        // payload is 16 kHz, but DO->client frames are 24 kHz (PROTOCOL
-        // section 2), so resample and re-wrap as type-0x02 with this
-        // listener's own downlink sequence. Relaying the raw uplink bytes
-        // played 16 kHz samples at 24 kHz on the listener (1.5x speed,
-        // raised pitch, choppy buffering).
-        const upsampled = upsample16kTo24kMono(payload);
-        if (upsampled.length === 0) continue;
-        const seq = this.outSeq.get(member.pid) ?? 0;
-        let relay: Uint8Array;
-        try {
-          relay = encodeAudioFrame({
-            type: FITRA_AUDIO_TYPE_DOWNLINK,
-            seq,
-            speaker: holder.index,
-            payload: upsampled,
-          });
-        } catch {
-          this.audioDrops += 1;
-          continue;
+        this.relayAudio(entry, holder, payload);
+        continue;
+      }
+      const group = membersByLang.get(targetLang);
+      if (group === undefined) membersByLang.set(targetLang, [entry]);
+      else group.push(entry);
+    }
+    if (membersByLang.size === 0) return;
+    if (manager === null) {
+      for (const [targetLang, group] of membersByLang) {
+        for (const { ws } of group) {
+          this.sendError(
+            ws,
+            "session-degraded",
+            `translation unavailable for ${sourceLang}->${targetLang}: audio muted`,
+          );
         }
-        this.outSeq.set(member.pid, nextAudioSeq(seq));
-        this.trySend(ws, relay);
-        continue;
       }
-      if (manager === null) {
-        this.sendError(
-          ws,
-          "session-degraded",
-          `translation unavailable for ${sourceLang}->${targetLang}: audio muted`,
-        );
-        continue;
+      return;
+    }
+    for (const [targetLang, group] of membersByLang) {
+      const pair = pairKey(sourceLang, targetLang);
+      this.pairSpeaker.set(pair, holder.index);
+      let feed: TranslationSession | null = null;
+      for (const { ws, member } of group) {
+        const acquired = manager.acquire(sourceLang, targetLang, member.pid, {
+          isTeacherLeg: member.role === "teacher",
+        });
+        if (acquired.degraded) {
+          this.sendError(
+            ws,
+            "session-degraded",
+            `translation capped for ${pair}: audio muted`,
+          );
+        } else if (feed === null) {
+          feed = acquired.session;
+        }
       }
-      const acquired = manager.acquire(sourceLang, targetLang, member.pid, {
+      if (feed !== null) feed.sendInputAudio(payloadBuf);
+    }
+  }
+
+  private relayAudio(
+    { ws, member }: Pick<LiveSocket, "ws" | "member">,
+    holder: SocketMember,
+    payload: Uint8Array,
+  ): void {
+    // Same-language relay (FR-021, no translation session): the uplink
+    // payload is 16 kHz, but DO->client frames are 24 kHz (PROTOCOL
+    // section 2), so resample and re-wrap as type-0x02 with this
+    // listener's own downlink sequence. Relaying the raw uplink bytes
+    // played 16 kHz samples at 24 kHz on the listener (1.5x speed,
+    // raised pitch, choppy buffering).
+    const upsampled = upsample16kTo24kMono(payload);
+    if (upsampled.length === 0) return;
+    const seq = this.outSeq.get(member.pid) ?? 0;
+    let relay: Uint8Array;
+    try {
+      relay = encodeAudioFrame({
+        type: FITRA_AUDIO_TYPE_DOWNLINK,
+        seq,
+        speaker: holder.index,
+        payload: upsampled,
+      });
+    } catch {
+      this.audioDrops += 1;
+      return;
+    }
+    this.outSeq.set(member.pid, nextAudioSeq(seq));
+    this.trySend(ws, relay);
+  }
+
+  /** Floor grants open the pair set eagerly (ensureSession effect) so the
+   * first spoken frame does not pay the session-opening gap. Acquire is
+   * idempotent per listener pid, so refs here match the per-frame path. */
+  private prewarmSessions(sourceRef: string): void {
+    const manager = this.ensureSessions();
+    if (manager === null) return;
+    const langs = this.memberLangs();
+    let sourcePid = sourceRef;
+    if (sourceRef === "teacher") {
+      const teacher = this.liveSockets().find(
+        (entry) => entry.member.role === "teacher",
+      );
+      if (teacher === undefined) return;
+      sourcePid = teacher.member.pid;
+    }
+    const sourceLang = langs.get(sourcePid);
+    if (sourceLang === undefined) return;
+    for (const { member } of this.liveSockets()) {
+      if (member.pid === sourcePid) continue;
+      const targetLang = langs.get(member.pid);
+      if (targetLang === undefined || targetLang === sourceLang) continue;
+      manager.acquire(sourceLang, targetLang, member.pid, {
         isTeacherLeg: member.role === "teacher",
       });
-      if (acquired.degraded) {
-        this.sendError(
-          ws,
-          "session-degraded",
-          `translation capped for ${pairKey(sourceLang, targetLang)}: audio muted`,
-        );
-        continue;
-      }
-      this.pairSpeaker.set(pairKey(sourceLang, targetLang), holder.index);
-      acquired.session.sendInputAudio(payloadBuf);
     }
   }
 
@@ -865,6 +964,37 @@ export class ClassRoom {
       attempt,
     } satisfies ServerMsg);
     for (const { ws } of this.liveSockets()) this.trySend(ws, msg);
+  }
+
+  /**
+   * PROTOCOL section 3.1 caption routing: both caption kinds go to the pair's
+   * target-language members. A listener belongs to exactly one pair (their
+   * language vs the current speaker's), so each receives at most one `input`
+   * and one `output` stream per turn; the speaker and same-language listeners
+   * are excluded automatically because a pair's target always differs from
+   * its source (fanout groups only cross pairs).
+   */
+  private broadcastCaption(
+    pair: string,
+    kind: "input" | "output",
+    text: string,
+    final: boolean,
+  ): void {
+    const sep = pair.indexOf("->");
+    if (sep < 0) return;
+    const targetLang = pair.slice(sep + 2);
+    const langs = this.memberLangs();
+    const msg = JSON.stringify({
+      t: "caption",
+      kind,
+      text,
+      final,
+    } satisfies ServerMsg);
+    for (const { ws, member } of this.liveSockets()) {
+      const lang = langs.get(member.pid);
+      if (lang === undefined) continue;
+      if (lang === targetLang) this.trySend(ws, msg);
+    }
   }
 
   /** Best-effort send: a socket that raced us to close must not kill fan-out. */
@@ -1003,6 +1133,7 @@ export class ClassRoom {
       name,
       lang,
     );
+    this.invalidateMemberLangs();
   }
 
   private loadRoster(): RosterEntry[] {
@@ -1057,16 +1188,17 @@ export class ClassRoom {
     const prior = live.find((entry) => entry.member.pid === claims.pid);
     if (prior !== undefined) {
       // Same participant, second socket: keep the seat, hand over the socket.
-      return {
-        ok: true,
-        member: {
-          pid: claims.pid,
-          role: prior.member.role,
-          index: prior.member.index,
-          session: this.allocateSession(room),
-        },
-        replaces: prior.ws,
+      // Bump the membership row's session id first, so the replaced socket's
+      // close event fails the row-guard in webSocketClose and cannot evict
+      // the live member.
+      const replacement: SocketMember = {
+        pid: claims.pid,
+        role: prior.member.role,
+        index: prior.member.index,
+        session: this.allocateSession(room),
       };
+      this.upsertMembership(replacement, name, claims.lang);
+      return { ok: true, member: replacement, replaces: prior.ws };
     }
     if (
       claims.role === "teacher" &&
@@ -1121,7 +1253,9 @@ export class ClassRoom {
     server.serializeAttachment({ ...member });
     if (member.role === "teacher") {
       this.publishFloor(
-        applyFloorEvent(this.floorState, { type: "teacherJoin" }),
+        applyFloorEvent(this.floorState, {
+          type: replaces !== null ? "teacherRejoin" : "teacherJoin",
+        }),
         server,
       );
     }
@@ -1175,7 +1309,10 @@ export class ClassRoom {
     const floor = this.currentFloor();
     for (const { ws, member } of this.liveSockets()) {
       if (except !== undefined && ws === except) continue;
-      ws.send(
+      // A replaced socket can still enumerate as live until its close event
+      // lands; sending to it must not throw inside acceptJoin's roster sync.
+      this.trySend(
+        ws,
         JSON.stringify({
           t: "welcome",
           participantId: member.pid,
@@ -1188,7 +1325,10 @@ export class ClassRoom {
   }
 
   private sendError(ws: WebSocket, code: RejectCode, message: string): void {
-    ws.send(JSON.stringify({ t: "error", code, message } satisfies ServerMsg));
+    this.trySend(
+      ws,
+      JSON.stringify({ t: "error", code, message } satisfies ServerMsg),
+    );
   }
 
   private rejectUpgrade(status: number, code: string, message: string): Response {
@@ -1218,6 +1358,7 @@ export class ClassRoom {
       Date.now(),
     );
     this.state.storage.sql.exec("DELETE FROM membership");
+    this.invalidateMemberLangs();
     this.teardownSessions();
     for (const ws of this.state.getWebSockets()) {
       this.sendError(ws, "room-closed", "room exceeded its maximum duration");
@@ -1269,6 +1410,7 @@ export class ClassRoom {
     }
     if (this.loadRoom() === null) return;
     this.state.storage.sql.exec("DELETE FROM membership");
+    this.invalidateMemberLangs();
     this.teardownSessions();
     this.state.storage.sql.exec(
       "UPDATE room_config SET expired_at_ms = ? WHERE id = 1 AND expired_at_ms IS NULL",

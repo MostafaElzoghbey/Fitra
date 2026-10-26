@@ -279,6 +279,177 @@ function equalBytes(a: Uint8Array, b: Uint8Array): boolean {
   return true;
 }
 
+async function connectAll(room: string, joins: Join[]): Promise<Inbox[]> {
+  const inboxes: Inbox[] = [];
+  for (const join of joins) {
+    const inbox = await connect(room, join);
+    await drainWelcomeAndHands(inbox, 1);
+    for (const prev of inboxes) await prev.nextOfType("welcome");
+    inboxes.push(inbox);
+  }
+  return inboxes;
+}
+
+async function teacherTakesFloorOn(
+  inboxes: Inbox[],
+  reason = "teacher-start",
+): Promise<void> {
+  const teacher = inboxes[0];
+  if (teacher === undefined) throw new Error("no teacher inbox");
+  teacher.ws.send(JSON.stringify({ t: "speaking-start" }));
+  const changed = await teacher.nextOfType("floor-changed");
+  expect(changed).toEqual({
+    t: "floor-changed",
+    floor: { kind: "teacher" },
+    reason,
+  });
+  for (const other of inboxes.slice(1)) {
+    expect(await other.nextOfType("floor-changed")).toEqual(changed);
+  }
+}
+
+function countMatchingEchoes(inbox: Inbox, payload: Uint8Array): number {
+  let count = 0;
+  for (const frame of inbox.binary) {
+    try {
+      const d = decodeAudioFrame(frame);
+      if (d.type === FITRA_AUDIO_TYPE_DOWNLINK && equalBytes(d.payload, payload)) {
+        count += 1;
+      }
+    } catch {
+      // Control/binary garbage: not an echo.
+    }
+  }
+  return count;
+}
+
+function captionsOf(inbox: Inbox): Extract<ServerMsg, { t: "caption" }>[] {
+  return inbox.text.filter(
+    (m): m is Extract<ServerMsg, { t: "caption" }> => m.t === "caption",
+  );
+}
+
+describe("pair-fanout dedupe, pre-warm, captions, rejoin (latency/quality M0.5)", () => {
+  it("feeds each translation pair exactly once per frame (N listeners share one feed)", async () => {
+    const room = freshRoom();
+    const [teacher, sEn1, sEn2, sFr] = await connectAll(room, [
+      { pid: "t", role: "teacher", lang: "ar", name: "Layla" },
+      { pid: "s-en1", role: "student", lang: "en", name: "Marco" },
+      { pid: "s-en2", role: "student", lang: "en", name: "Maya" },
+      { pid: "s-fr", role: "student", lang: "fr", name: "Aisha" },
+    ]);
+    if (teacher === undefined || sEn1 === undefined || sEn2 === undefined || sFr === undefined) {
+      throw new Error("missing inboxes");
+    }
+    await teacherTakesFloorOn([teacher, sEn1, sEn2, sFr]);
+
+    // 4 frames: pre-warmed at grant, every frame must reach the pair feed
+    // exactly once -> 4 echoes per listener. Bug shape: 2 en listeners double
+    // feed ar->en (6 echoes) while fr gets 3.
+    const payload = new Uint8Array(160).fill(0x77);
+    for (let i = 0; i < 4; i += 1) {
+      teacher.ws.send(uplinkFrame(i, payload));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(countMatchingEchoes(sEn1, payload)).toBe(4);
+    expect(countMatchingEchoes(sEn2, payload)).toBe(4);
+    expect(countMatchingEchoes(sFr, payload)).toBe(4);
+    await sEn1.quietBinary();
+    await sEn2.quietBinary();
+  });
+
+  it("pre-warms sessions at floor grant: session-status arrives before any audio", async () => {
+    const room = freshRoom();
+    const { teacher, sEn, sFr, sAr2 } = await quartet(room);
+    await teacherTakesFloor(teacher, sEn, sFr, sAr2);
+
+    // No audio frames were sent: the grant itself must open the pairs. Pair
+    // statuses interleave arbitrarily on every inbox, so scan until the pair
+    // matches instead of assuming an order.
+    async function statusFor(
+      inbox: Inbox,
+      pair: string,
+    ): Promise<Extract<ServerMsg, { t: "session-status" }>> {
+      for (let seen = 0; seen < 8; seen += 1) {
+        const st = await inbox.nextOfType("session-status");
+        if (st.pair === pair) return st;
+      }
+      throw new Error(`no session-status for ${pair}`);
+    }
+    const enStatus = await statusFor(sEn, "ar->en");
+    expect(["connecting", "live"]).toContain(enStatus.status);
+    await statusFor(sFr, "ar->fr");
+  });
+
+  it("routes captions: both kinds to target-lang members, never to speaker/same-lang", async () => {
+    const room = freshRoom();
+    const { teacher, sEn, sFr, sAr2 } = await quartet(room);
+    await teacherTakesFloor(teacher, sEn, sFr, sAr2);
+
+    const payload = new Uint8Array(160).fill(0x66);
+    for (let i = 0; i < 3; i += 1) {
+      teacher.ws.send(uplinkFrame(i, payload));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    // One listener belongs to exactly one pair, so one caption stream of each
+    // kind; the routing contract is about kind/lang membership.
+    const enCaptions = captionsOf(sEn);
+    expect(enCaptions.length).toBeGreaterThanOrEqual(2);
+    expect(enCaptions.some((c) => c.kind === "input")).toBe(true);
+    expect(enCaptions.some((c) => c.kind === "output")).toBe(true);
+    for (const cap of enCaptions) {
+      expect(typeof cap.text).toBe("string");
+      expect(cap.text.length).toBeGreaterThan(0);
+    }
+    // Same-lang listeners (incl. the speaker) get neither kind.
+    expect(captionsOf(sAr2)).toEqual([]);
+    expect(captionsOf(teacher)).toEqual([]);
+    // Per-pair output routing: the fr pair targets fr.
+    expect(captionsOf(sFr).some((c) => c.kind === "output")).toBe(true);
+  });
+
+  it("teacher socket replacement keeps membership and floor (teacherRejoin, no teacher-taken)", async () => {
+    const room = freshRoom();
+    const teacherJoin: Join = {
+      pid: "t",
+      role: "teacher",
+      lang: "ar",
+      name: "Layla",
+    };
+    const [t1, sEn] = await connectAll(room, [
+      teacherJoin,
+      { pid: "s-en", role: "student", lang: "en", name: "Marco" },
+    ]);
+    if (t1 === undefined || sEn === undefined) throw new Error("missing inboxes");
+
+    const t2 = await connect(room, teacherJoin);
+    // teacherRejoin's floor-changed broadcast precedes the welcome frame, so
+    // read it BEFORE drainWelcomeAndHands (nextOfType would skip past it).
+    const changed = await t2.nextOfType("floor-changed");
+    expect(changed.reason).toBe("teacher-rejoin");
+    await drainWelcomeAndHands(t2, 1);
+
+    expect(
+      t2.text.filter((m) => m.t === "error" && m.code === "teacher-taken"),
+    ).toEqual([]);
+
+    // sEn receives the same teacher-rejoin floor sync; drain it so the next
+    // floor-changed it observes is the floor grant itself.
+    expect((await sEn.nextOfType("floor-changed")).reason).toBe(
+      "teacher-rejoin",
+    );
+
+    // Membership row survived the replaced socket's close: translation flows.
+    await teacherTakesFloorOn([t2, sEn]);
+    const payload = new Uint8Array(160).fill(0x88);
+    for (let i = 0; i < 4; i += 1) {
+      t2.ws.send(uplinkFrame(i, payload));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(countMatchingEchoes(sEn, payload)).toBe(4);
+  });
+});
+
 describe("ClassRoom audio fan-out (T-009, FR-015/020..025)", () => {
   it("en+fr students receive translated frames when the ar teacher speaks", async () => {
     const room = freshRoom();

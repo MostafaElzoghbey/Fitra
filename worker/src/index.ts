@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { ClassRoom } from "./room.js";
-import { signJoinToken, type JoinRole } from "./auth/token.js";
+import { signJoinToken, verify, type JoinRole } from "./auth/token.js";
 
 // T-005: room create/join + HMAC join-token issuance (SPEC FR-001..007,
 // FR-050/052; docs/PROTOCOL.md sections 3-4).
@@ -260,6 +260,60 @@ app.post("/rooms/:code/join", async (c) => {
     secret,
   );
   return c.json({ token }, 200);
+});
+
+// Rejoin (latency/quality M0.5, PROTOCOL.md section 1): a dropped socket
+// replays its ORIGINAL token; the endpoint waives expiry but re-verifies
+// signature + claims, then re-mints the SAME pid with a fresh iat/exp so the
+// DO upgrade path and floor state keep the member identity stable.
+app.post("/rooms/:code/rejoin", async (c) => {
+  const env = c.env;
+  const code = c.req.param("code");
+
+  let body: unknown;
+  try {
+    body = (await c.req.json()) as unknown;
+  } catch {
+    return error(c, 400, "invalid-body", "request body must be JSON");
+  }
+  if (!isRecord(body)) {
+    return error(c, 400, "invalid-body", "request body must be an object");
+  }
+  const token = body["token"];
+  if (typeof token !== "string" || token.length === 0) {
+    return error(c, 400, "invalid-body", "token must be a non-empty string");
+  }
+  const room = rooms.get(code) ?? (await lookupRoom(env, code));
+  if (room === null) {
+    return error(c, 404, "unknown-room", `unknown room: ${code}`);
+  }
+  const secret = env.JOIN_TOKEN_HMAC_SECRET;
+  if (secret === undefined || secret.length === 0) {
+    return error(
+      c,
+      500,
+      "server-misconfigured",
+      "join token secret is not configured",
+    );
+  }
+  const claims = await verify(
+    token,
+    secret,
+    Math.floor(Date.now() / 1000),
+    { ignoreExpiry: true },
+  );
+  if (
+    claims === null ||
+    claims.room !== code ||
+    !parseSupportedLanguages(env).includes(claims.lang)
+  ) {
+    return error(c, 400, "invalid-token", "rejoin token rejected");
+  }
+  const freshToken = await signJoinToken(
+    { room: claims.room, pid: claims.pid, role: claims.role, lang: claims.lang },
+    secret,
+  );
+  return c.json({ token: freshToken }, 200);
 });
 
 export { ClassRoom };

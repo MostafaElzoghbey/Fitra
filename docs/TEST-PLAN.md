@@ -10,7 +10,7 @@ failure injection). Real Gemini only in the opt-in manual smoke test.
 | Floor-control machine | all 12 table rows in `docs/FLOOR-CONTROL.md` + FIFO hands, preempt, double-teacher, disconnect mid-speech | FR-010–016 |
 | SessionManager | lazy open, refcount share (2 listeners 1 session), idle-close, cap overflow protects teacher leg, reconnect backoff sequence | FR-020–025 |
 | Protocol codec | header encode/decode, seq wrap, oversize reject, bad version reject, JSON type guards | `docs/PROTOCOL.md` |
-| Join token | sign/verify, expiry, tamper reject, role binding | FR-003/050 |
+| Join token | sign/verify, expiry, tamper reject, role binding, rejoin verify (`ignoreExpiry`) re-signing the SAME pid | FR-003/050 |
 
 ## 2. Durable Object (Vitest + Cloudflare Workers pool)
 
@@ -25,6 +25,16 @@ Drive the DO with Fake provider: join teacher+students, grant floor, push
 PCM frames, assert fan-out per language, same-language passthrough untouched,
 non-floor audio dropped, rate-limit trips. Hono routes tested via
 `app.request` (source: `https://hono.dev/docs/guides/testing`).
+
+M0.5 latency/quality suite (`tests/fanout.test.ts`, describe
+"pair-fanout dedupe, pre-warm, captions, rejoin"): each translation pair
+receives exactly ONE uplink feed per frame regardless of listener count
+(N same-language listeners share one session feed); sessions pre-warm at
+floor grant (`session-status` arrives before any audio); caption routing
+(both kinds → target-language members,
+speaker and same-language listeners get neither); teacher socket replacement
+keeps the membership row and floor (`teacher-rejoin` broadcast, no
+`error{teacher-taken}`, replaced socket's close cannot evict the row).
 
 ## 3. E2E (Playwright, Chromium, no Gemini)
 
@@ -60,6 +70,8 @@ multilingual, so text assertions are inherently fragile.
 | Room | `raise-hand`, `lower-hand`, `revoke` | |
 | Room | `roster`, `roster-row-<participantId>`, `grant-<participantId>`, `deny-<participantId>` | `participantId` comes from `welcome` |
 | Room | `mic-toggle`, `test-deployment-badge`, `headphones-hint`, `room-error` | |
+| Room | `room-disconnected`, `room-code-banner` | `room-disconnected` shows while the socket is down and the client rejoin retries are exhausted or blocked |
+| Room | `captions`, `captions-empty` | M0.5 caption frames: `output` translated text + `input` source transcription; `captions-empty` until the first caption |
 | Room | `metrics-mount` | T-012 renders the panel inside this node |
 | Room | `metrics-panel` | T-012 panel root; `metrics-pending` chip until the first `metrics` frame |
 | Room | `metric-latency` | `data-latency-ms` absent until measured, `data-samples`, `data-source` = `local` (browser estimate) / `server` |

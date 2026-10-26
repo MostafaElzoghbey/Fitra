@@ -254,6 +254,98 @@ describe("POST /rooms/:code/join (T-005)", () => {
   });
 });
 
+describe("POST /rooms/:code/rejoin (latency/quality M0.5, PROTOCOL.md section 1)", () => {
+  async function rejoin(
+    env: WorkerEnv,
+    code: string,
+    payload: unknown,
+  ): Promise<Response> {
+    return app.request(
+      `/rooms/${code}/rejoin`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: typeof payload === "string" ? payload : JSON.stringify(payload),
+      },
+      env,
+    );
+  }
+
+  it("expired join token re-mints the SAME pid with a fresh token", async () => {
+    const env = mockEnv();
+    const code = await createRoomCode(env);
+    const nowS = Math.floor(Date.now() / 1000);
+    const expired = await signJoinToken(
+      { room: code, pid: "same-pid-1", role: "student", lang: "en" },
+      TEST_SECRET,
+      { nowS: nowS - 3600, ttlS: 600 },
+    );
+    const res = await rejoin(env, code, { token: expired });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as TokenBody;
+    const claims = await verify(body.token as string, TEST_SECRET);
+    expect(claims?.pid).toBe("same-pid-1");
+    expect(claims?.room).toBe(code);
+    expect(claims?.role).toBe("student");
+    expect(claims?.lang).toBe("en");
+    expect((claims?.exp ?? 0) + 1 > nowS).toBe(true);
+  });
+
+  it("unknown room queries the DO fallback and still rejects 404", async () => {
+    const env = mockEnv(undefined, async () => Response.json({ exists: false }));
+    const res = await rejoin(env, "ZZZZZZ", { token: "a.b.c" });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as ErrorBody;
+    expect(body.code).toBe("unknown-room");
+    expect(doFetchStub(env).mock.calls.length).toBe(1);
+  });
+
+  it("rejects token for a different room after DO fallback lookup", async () => {
+    const env = mockEnv(undefined, async (req) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/internal/register") return Response.json({ ok: true });
+      return Response.json({ exists: true, teacherLang: "ar" });
+    });
+    const other = await signJoinToken(
+      { room: "OTHER9", pid: "p1", role: "student", lang: "en" },
+      TEST_SECRET,
+    );
+    const res = await rejoin(env, "REALCODE", { token: other });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as ErrorBody;
+    expect(body.code).toBe("invalid-token");
+  });
+
+  it("rejects tampered tokens with error{invalid-token}", async () => {
+    const env = mockEnv();
+    const code = await createRoomCode(env);
+    const token = await signJoinToken(
+      { room: code, pid: "p1", role: "student", lang: "en" },
+      TEST_SECRET,
+    );
+    const parts = token.split(".");
+    const tampered = `${parts[0] as string}.AAAA.${parts[2] as string}`;
+    const res = await rejoin(env, code, { token: tampered });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as ErrorBody;
+    expect(body.code).toBe("invalid-token");
+  });
+
+  it("rejects missing/malformed body without touching the DO", async () => {
+    const env = mockEnv();
+    const code = await createRoomCode(env);
+    const callsAfterCreate = doFetchStub(env).mock.calls.length;
+    const missing = await rejoin(env, code, {});
+    expect(missing.status).toBe(400);
+    const malformed = await rejoin(env, code, "{not json");
+    expect(malformed.status).toBe(400);
+    const body = (await missing.json()) as ErrorBody;
+    expect(body.code).toBe("invalid-body");
+    // Room creation legitimately calls /internal/register; rejoin must not.
+    expect(doFetchStub(env).mock.calls.length).toBe(callsAfterCreate);
+  });
+});
+
 describe("join token sign/verify (T-005, docs/PROTOCOL.md section 4)", () => {
   it("verify() returns claims for a token signed with the same secret", async () => {
     const token = await signJoinToken(
@@ -312,6 +404,38 @@ describe("join token sign/verify (T-005, docs/PROTOCOL.md section 4)", () => {
       { ttlS: -1 },
     );
     await expect(verify(token, TEST_SECRET)).resolves.toBeNull();
+  });
+
+  it("expired token verifies with ignoreExpiry (rejoin path)", async () => {
+    const nowS = Math.floor(Date.now() / 1000);
+    const token = await signJoinToken(
+      { room: "ABC123", pid: "p1", role: "student", lang: "fr" },
+      TEST_SECRET,
+      { nowS: nowS - 3600, ttlS: 600 },
+    );
+    await expect(verify(token, TEST_SECRET)).resolves.toBeNull();
+    const claims = await verify(token, TEST_SECRET, nowS, { ignoreExpiry: true });
+    expect(claims).toEqual({
+      room: "ABC123",
+      pid: "p1",
+      role: "student",
+      lang: "fr",
+      iat: nowS - 3600,
+      exp: nowS - 3600 + 600,
+    });
+  });
+
+  it("ignorExpiry does not bypass signature or claim-shape checks", async () => {
+    const token = await signJoinToken(
+      { room: "ABC123", pid: "p1", role: "student", lang: "fr" },
+      TEST_SECRET,
+      { ttlS: -1 },
+    );
+    await expect(
+      verify(token, "a-different-secret", Math.floor(Date.now() / 1000), {
+        ignoreExpiry: true,
+      }),
+    ).resolves.toBeNull();
   });
 
   it("malformed token rejects", async () => {

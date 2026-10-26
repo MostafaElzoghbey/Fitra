@@ -4,7 +4,9 @@ export type Lang = string; // BCP-47, validated against config allowlist
 
 export interface TranslationSessionEvents {
   onAudio: (pcm24kMono: ArrayBuffer) => void;   // 24kHz PCM16LE mono chunks
-  onTranscript?: (kind: "input" | "output", text: string) => void; // only if API yields them
+  /** `text` is the full current segment so far (provider-normalized);
+   * `final` marks the last emission of a turn. */
+  onTranscript?: (kind: "input" | "output", text: string, final: boolean) => void;
   onStatus: (s: "connecting" | "live" | "reconnecting" | "failed", detail?: string) => void;
   onGoAway?: (timeLeftMs: number) => void;
 }

@@ -110,6 +110,13 @@ export async function signJoinToken(
   return `${headerB64}.${claimsB64}.${b64urlEncode(new Uint8Array(sig))}`;
 }
 
+export interface VerifyOptions {
+  /** Skip the exp check while keeping signature + claim-shape validation.
+   * Used by the rejoin endpoint (PROTOCOL.md §4): a dropped socket may
+   * rejoin past the 10-minute join window with its original identity. */
+  readonly ignoreExpiry?: boolean;
+}
+
 /**
  * Verify a join token. Returns the claims on success, null on any failure
  * (malformed, bad algorithm, signature mismatch, bad claim shape, expired).
@@ -120,6 +127,7 @@ export async function verify(
   token: string,
   secret: string,
   nowS: number = Math.floor(Date.now() / 1000),
+  opts: VerifyOptions = {},
 ): Promise<JoinClaims | null> {
   const parts = token.split(".");
   if (parts.length !== 3) return null;
@@ -188,6 +196,6 @@ export async function verify(
   ) {
     return null;
   }
-  if (exp <= nowS) return null;
+  if (exp <= nowS && opts.ignoreExpiry !== true) return null;
   return { room, pid, role, lang, iat, exp };
 }

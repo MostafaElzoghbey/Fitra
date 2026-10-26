@@ -52,6 +52,9 @@ export default defineConfig({
               bindings: {
                 JOIN_TOKEN_HMAC_SECRET: TEST_JOIN_TOKEN_SECRET,
                 MAX_STUDENTS: 4,
+                // Caption-routing tests need a transcript-capable fake; the
+                // default fake stays silent for every other DO test.
+                FAKE_EMIT_TRANSCRIPTS: "1",
               },
             },
           }),

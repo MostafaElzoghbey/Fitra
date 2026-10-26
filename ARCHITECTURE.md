@@ -176,6 +176,15 @@ export interface TranslationProvider {
   `maxTranslationSessions` (default 8). Overflow policy: protect teacher-leg
   sessions, then earliest-created; overflowed listeners receive
   `session-degraded` + muted translated track (FR-024).
+  M0.5 latency/quality additions the DO wraps around it: floor grants open
+  the pair set eagerly (ensureSession effect → `prewarmSessions`) so the
+  first spoken frame does not pay the session-opening gap; each frame is fed
+  to a pair exactly ONCE regardless of listener count (a per-listener feed
+  garbles streaming transcription and multiplied speaker turns); `onTranscript`
+  events are routed as `caption` frames to the pair's target-language
+  sockets (both kinds — PROTOCOL.md section 3.1); membership language
+  lookups are cached until any membership
+  row changes (previously 2 SQLite reads/frame at 10 frames/s speaker).
 - **Gemini provider** (documented parameters; wire details to verify in OQ-01):
   model `gemini-3.5-live-translate-preview`; setup carries
   `responseModalities: ["AUDIO"]`,
@@ -191,7 +200,10 @@ export interface TranslationProvider {
   `https://ai.google.dev/gemini-api/docs/live-api/live-translate`).
 - **Fake provider**: echoes input audio tagged per language (e.g. prepends a
   marker tone / delays), configurable `delayMs`, failure injection
-  (`failAfter`, `dropRate`) for tests. Default in dev/test.
+  (`failAfter`, `dropRate`) for tests. Default in dev/test. Optionally emits
+  deterministic input/output transcripts per accepted send, opt-in via the
+  `FAKE_EMIT_TRANSCRIPTS` env binding, for DO caption-routing tests; real
+  captions come from Gemini segments only.
 
 ## 5. Wrangler bindings & environment
 
