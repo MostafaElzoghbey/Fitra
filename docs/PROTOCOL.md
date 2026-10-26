@@ -126,6 +126,43 @@ reused after they leave (0 = teacher, students take 1, 2, 3, …).
 
 A `hands` frame is sent alongside each `welcome`.
 
+## 3.3 Metrics cadence and semantics
+
+The DO owns the counters and broadcasts `metrics` only as a side effect of real
+activity:
+
+- **Cadence**: at most one `metrics` frame per 2 s per room while events are
+  flowing (audio/control/status), plus one immediately after any
+  `session-status` transition. No timers, no `setInterval`, no wake-up for an
+  idle room (FR-042/043) — an empty room stays hibernatable.
+- **Counts are real**, not the 20:1 billing ratio: `inboundMsgPerSec` counts
+  every browser→DO frame (binary + control), `outboundMsgPerSec` every
+  DO→browser frame. Rates use a sliding 1 s window computed at broadcast time.
+- **`errorsLastMin`** counts `error` frames sent in the previous 60 s.
+- **`sessions`** is a snapshot of live translation pairs: `pair`, current
+  `status`, and `reconnects` (attempts since the pair opened). A pair with no
+  live listener is absent, so the table cannot show phantom sessions.
+- **`doActiveSec`** is seconds since room creation (wall clock), i.e. the
+  conservative upper bound on billed DO duration for this instance.
+- **`e2eLatencyMs`** is `null` from the DO. The browser measures the real
+  speaker-chunk→first-translated-chunk round trip (`audio/latency.ts`) and the
+  panel prefers it; the server field is reserved for a future server-side
+  timestamp pair and must never be fabricated.
+
+## 3.4 Caption display expectations (client side)
+
+The wire semantics in section 3.1 are normative; the client MUST:
+
+- replace the live segment on `final:false` and commit it on `final:true`
+  (keeping at most 50 committed segments in memory);
+- render at most two visual lines for the live segment, with committed history
+  scrollable — long translations must not push the controls off-screen;
+- label the source (`input`) and translated (`output`) streams distinctly;
+- use `aria-live="polite"` on the committed region and inherit the page `dir`,
+  so Arabic and other RTL languages render correctly;
+- show the documented empty state when an engine yields no captions (never a
+  permanent "loading" affordance).
+
 ## 4. Join token (HMAC, M0; Better Auth mints same claims in M2)
 
 ```

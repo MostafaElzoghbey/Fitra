@@ -198,6 +198,38 @@ export interface TranslationProvider {
   without them; same source). In 16 kHz PCM16LE mono 100 ms chunks; out
   24 kHz PCM16LE mono (source:
   `https://ai.google.dev/gemini-api/docs/live-api/live-translate`).
+
+### 4.1 Verified Gemini Live Translate envelope (2026-10)
+
+Everything in this table was re-checked against the official Live Translate
+and Live session-management pages on 2026-10-26. "Docs-verified" means the
+public reference states it; "reported" means a non-official observation that
+we design around but do not promise in the UI.
+
+| Area | What the model actually does | Our use |
+|---|---|---|
+| Model / languages | `gemini-3.5-live-translate-preview`, 70+ languages incl. `ar`, `en`, `fr`, `es` (docs-verified) | Server allowlist, BCP-47 validated at join (FR-006/007) |
+| Directions | Audio-to-audio translation for one source → one `targetLanguageCode`; source language is auto-detected (docs-verified) | One session per `(src→tgt)` pair; never ask the user for a source language |
+| Tone / voice | Output is synthesized in a voice derived from the speaker; the docs describe replication as imperfect (drift after pauses, occasional gender mismatch). No `speechConfig`/prebuilt-voice selection is documented for the translate model (OQ-03) | Do **not** ship a voice/tone picker. UI says "voice is generated"; headphones recommended |
+| Steering | The translate model does not accept system instructions, glossaries, function tools or arbitrary prompts (docs-verified: it is a dedicated audio translation model) | No glossary box, no "translate formally" control. Domain terminology stays an M3 evaluation item (OQ-12) |
+| Input audio | Raw PCM16LE mono **16 kHz**, audio-only, 100 ms chunks recommended; input token cap 131 072 (docs-verified) | 100 ms / 3 200 B uplink frames (FR-030/032) |
+| Output audio | Raw PCM16LE mono **24 kHz**, arbitrary chunk sizes; output token cap 65 536 (docs-verified) | Split into ≤8 KiB type-0x02 frames, play at 24 kHz (FR-031) |
+| Echo / background | `echoTargetLanguage` defaults to false; the docs warn about echo/background artifacts, especially when enabled (docs-verified) | Always false; same-language listeners are relayed, never fed to a session (FR-021) |
+| Session lifetime | Audio-only sessions are capped (~15 min) and connections rotate (~10 min) with a `GoAway` warning; resumption handles are valid for 2 h; context-window compression is the documented mitigation (docs-verified) | `sessionResumption` + compression 20 k/8 k, GoAway handling, bounded reconnect (FR-025) |
+| Endpointing / VAD | Automatic server-side turn detection exists in the Live API; the translate page does not document a tunable `silenceDurationMs` for this model (unverified — OQ-11) | Keep 100 ms continuous streaming; do not add a fake VAD slider |
+| Latency | No official number for the translate model. The product target remains measured <2 s to first translated chunk (NFR-005); external reports put conversational interpretation at roughly 2–3 s (reported, not a contract) | Measure in the panel; optimise only levers we control (pre-warm, 100 ms frames, no DO parsing) |
+| Transport | Plain WSS with base64 JSON audio is sufficient at this scale; 24 kHz PCM16 mono is ~48 kB/s per listener downstream (arithmetic), and outgoing WS messages are free on Workers (docs-verified pricing) | Keep PCM16 + WebSocket for M0/M1. Opus/WebTransport/WebRTC only if measurements demand it (OQ-09) |
+
+Consequences that are deliberately **out** of M0–M1: voice/tone selection,
+speed/rate control, glossary or prompt steering, and per-word translation
+timing. None of them are documented capabilities of this model, so exposing
+controls would be a lie (AGENTS.md: never fake a capability).
+
+Latency levers we do control: (1) pre-warm the pair set at floor grant
+(already wired); (2) feed each pair exactly once per frame (already wired);
+(3) keep the DO byte-forwarding path free of parsing; (4) avoid extra
+client-side pre-roll — the current 400 ms playback pre-roll is a deliberate
+jitter trade-off, revisited only with measurements (OQ-06).
 - **Fake provider**: echoes input audio upsample 16→24 kHz (per the provider
   output contract) and optionally tagged per language (prepends a 2-byte
   marker), configurable `delayMs`, failure injection

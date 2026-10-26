@@ -26,6 +26,16 @@ Each task ≤ half a day, independently testable, with acceptance + proving test
 | T-018 | 30-min soak (Fake, then Gemini-on) → correct LIMITS.md if off | Drop/reconnect counts recorded | soak log |
 | T-019 | Gemini smoke latency log (OQ-06) + NFR-005 baseline | Latency numbers in TEST-PLAN appendix/OPEN-QUESTIONS | manual log |
 
+## M0.6 "Translation you can trust" (observability + captions)
+
+| ID | Task | Acceptance | Proved by |
+|---|---|---|---|
+| T-020 | DO metrics broadcast: real inbound/outbound counters, 60 s error window, live session snapshot, `doActiveSec`, 2 s throttle + immediate-on-status; `e2eLatencyMs` stays `null` | `metrics` reaches clients while audio flows; rates match sent counts; idle room emits none; frame passes `isRoomMetrics` | `worker/tests/metrics*.test.ts` + DO test + E2E `metric-sessions` |
+| T-021 | Caption UX: pure reducer (`web/src/captions.ts`), interim→final commit, 2-line live + 50-segment scrollback, input/output labels, `aria-live`, RTL inheritance, documented empty state | Interim updates replace; finals commit once; history caps at 50; Arabic renders RTL; empty engine state shown | `web/tests/captions.test.ts` + E2E captions |
+| T-022 | Capture Gemini `sessionResumptionUpdate` handles and pass them on reconnect; surface `GoAway` as `reconnecting` with attempt; no behaviour depends on context surviving | Handle captured per session, resent on reconnect, stale-generation updates ignored | `worker/tests/gemini.test.ts` + `sessions.test.ts` |
+| T-023 | UI copy pass: "voice is generated" note, headphones hint, no voice/tone/glossary controls | Arabic + English strings agree; no control exists for an undocumented capability | E2E + review |
+| T-024 | Panel shows server sessions and real rates (replace the "server gap" expectation in `e2e/m0-flow.spec.ts`) | `metric-sessions` rows carry `data-status="live"` | E2E |
+
 M0 acceptance (end to end): teacher tab (ar) speaks → student tab (en) hears
 English; student raises hand → granted → speaks → teacher hears Arabic;
 metrics panel shows latency. Deployable via `wrangler deploy`.

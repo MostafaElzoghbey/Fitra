@@ -130,6 +130,14 @@ end to end as early as possible.
   OQ-01). Routing: `output` and `input` captions both go to the pair's
   target-language sockets (PROTOCOL.md section 3.1). Memory only — no
   caption data is ever persisted.
+- **FR-035** Caption display MUST treat `final:false` as a live replacement of
+  the current segment for that `kind` and `final:true` as the commit of that
+  segment (never overwrite a committed segment with the next interim one).
+  The UI shows a two-line live region per kind, keeps at most 50 committed
+  segments in memory, labels input vs translated text, uses `aria-live` for
+  the committed line, and inherits the page `dir` so Arabic renders RTL.
+  Captions are optional: an engine that yields none shows the documented
+  empty state, never a spinner that implies one is coming.
 
 ### 4.5 Debug / metrics panel (M0)
 
@@ -138,6 +146,18 @@ end to end as early as possible.
   inbound/outbound message rates, error log, DO active-duration estimate.
 - **FR-041** All metrics are client-observable or DO-reported over the control
   channel; no D1 writes for metrics (free-tier rule).
+- **FR-042** The DO broadcasts `metrics` on the control channel at most once
+  per 2 s while the room is active, and immediately after a translation
+  session status change. Counters are real message counts (not the 20:1
+  billing ratio); rates use a 1 s sliding window; `errorsLastMin` counts
+  errors in the last 60 s; `sessions` is a snapshot of live pairs with their
+  reconnect counts. `e2eLatencyMs` is `null` from the DO until a server-side
+  send/receipt pair exists — the browser's local estimate is authoritative
+  for display. Broadcasts stop when the room is idle (no timers, no
+  `setInterval`).
+- **FR-043** A room with no traffic MUST NOT wake or hold the DO open just to
+  emit metrics: the throttled broadcast piggybacks on real events, so an idle
+  room stays hibernatable.
 
 ### 4.6 Security and abuse limits
 
@@ -174,3 +194,8 @@ end to end as early as possible.
 Video, payments, recording (explicitly forbidden by default — see
 `docs/PRIVACY.md`), mobile apps, WebRTC/SFU (future path: Cloudflare Realtime
 SFU — see OQ-09), multi-teacher rooms, breakout rooms, whiteboard, chat.
+
+Also out of scope while the translate model does not document them
+(ARCHITECTURE.md §4.1): synthetic voice/tone selection, speech-rate control,
+glossary or prompt steering, and per-word caption timing. These must not ship
+as placeholder controls.

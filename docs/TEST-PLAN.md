@@ -11,6 +11,8 @@ failure injection). Real Gemini only in the opt-in manual smoke test.
 | SessionManager | lazy open, refcount share (2 listeners 1 session), idle-close, cap overflow protects teacher leg, reconnect backoff sequence | FR-020–025 |
 | Protocol codec | header encode/decode, seq wrap, oversize reject, bad version reject, JSON type guards | `docs/PROTOCOL.md` |
 | Join token | sign/verify, expiry, tamper reject, role binding, rejoin verify (`ignoreExpiry`) re-signing the SAME pid | FR-003/050 |
+| Caption reducer (`web/tests/captions.test.ts`) | interim replaces, final commits exactly once, next interim does not overwrite history, 50-segment cap evicts oldest, input/output streams independent, empty final is ignored, RTL text passes through unchanged | FR-034/035 |
+| Metrics aggregation (`worker/tests/metrics.test.ts`) | sliding 1 s rate window, 60 s error window, session snapshot ordering, throttled emit (≤1/2 s), immediate emit on status change, idle room emits nothing | FR-040–043 |
 
 ## 2. Durable Object (Vitest + Cloudflare Workers pool)
 
@@ -36,6 +38,16 @@ speaker and same-language listeners get neither); teacher socket replacement
 keeps the membership row and floor (`teacher-rejoin` broadcast, no
 `error{teacher-taken}`, replaced socket's close cannot evict the row).
 
+M0.6 observability suite (`tests/metrics-do.test.ts`): a live room receives
+`metrics` within 2 s of audio/control activity; the frame validates against
+`isRoomMetrics`; `inboundMsgPerSec`/`outboundMsgPerSec` are real counts
+(not the 20:1 ratio); `sessions` lists exactly the live pairs with reconnect
+counts; `errorsLastMin` increments after an `error` frame and expires;
+`doActiveSec` advances with wall clock; a room with no traffic emits no
+`metrics` frame (no timer wakes it). Caption frames with
+`FAKE_EMIT_TRANSCRIPTS=1` validate against `isServerMsg` and reach only the
+target-language sockets (already covered in fanout, re-asserted here).
+
 ## 3. E2E (Playwright, Chromium, no Gemini)
 
 - 3 contexts: teacher (ar) + students (en, fr), `FakeTranslationProvider`.
@@ -46,6 +58,15 @@ keeps the membership row and floor (`teacher-rejoin` broadcast, no
   grant → student speaks → teacher receives; revoke → silence; metrics panel
   shows latency number.
 - CI-safe: no secrets, no network beyond localhost/Miniflare.
+
+M0.6 E2E additions: the room shell is launched with `FAKE_EMIT_TRANSCRIPTS=1`;
+after the teacher speaks, the `en` student sees `captions` with a committed
+`output` segment, and a second interim update does not duplicate history.
+`metric-sessions` now lists `ar->en` and `ar->fr` from the DO broadcast
+(`data-status="live"`), proving FR-040/041 instead of asserting the old
+"no server metrics" gap. The caption live region is asserted to be
+`aria-live="polite"` and to inherit `dir="rtl"` on the Arabic UI, and the
+metrics counters advance while audio flows.
 
 Harness note (T-016): `e2e/playwright.config.ts` must run the **worker's**
 wrangler, not the repo-root one. The root pin (`wrangler@3.114`) bundles a

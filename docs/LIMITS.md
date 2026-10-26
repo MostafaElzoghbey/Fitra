@@ -59,6 +59,25 @@ official docs describe as inconsistent (can drift after pauses or mis-assign
 gender). The output is not a bit-exact clone of the speaker; no `speechConfig`
 voice pinning is documented for this model.
 
+### 2.1 Verified envelope and what cannot be tuned (2026-10-26)
+
+| Point | Verified value | Implication |
+|---|---|---|
+| Source language | Auto-detected; no source-language field in `translationConfig` | Never ask a participant for a second "source" language |
+| Target language | One `targetLanguageCode` per session | One session per `(src→tgt)` pair; shared by all listeners of that target |
+| Steering | No system instructions, glossary, tools or style prompt on the translate model | No "formal tone"/glossary UI in M0–M1 (OQ-12) |
+| Voice | Automatic speaker-derived synthesis; no documented voice picker | No voice selector; copy must say the voice is generated (OQ-03) |
+| Endpointing | Live API has automatic VAD; the translate page does not document a `silenceDurationMs` knob | Keep continuous 100 ms streaming; no VAD slider (OQ-11) |
+| Input | PCM16LE mono 16 kHz, audio-only, 100 ms recommended, 131 072 input tokens | Browser resamples to 16 kHz; DO never parses payloads |
+| Output | PCM16LE mono 24 kHz, arbitrary chunk sizes, 65 536 output tokens | Split to ≤8 KiB frames; play at 24 kHz |
+| Downlink bandwidth | 24 000 samples/s × 2 B = **48 kB/s per listener** (arithmetic) | 30 listeners ≈ 1.4 MB/s of DO→client messaging, which is free on Workers; it is CPU/socket fan-out, not billing, that bounds scale |
+| Session caps | ~10 min connection, audio-only ~15 min, GoAway ~60 s ahead, resumption handles valid 2 h | Reconnect + resumption are mandatory, not optional |
+| Published latency | None for this model | NFR-005 stays a measured target; external 2–3 s interpretation figures are reported, not promised |
+
+Deliberate non-goals: speed/rate control, per-word timing, glossary steering,
+and voice selection. None are documented capabilities, so the UI must not
+pretend they exist.
+
 ## 3. One-hour class budget: 1 teacher + 10 students, 3 languages (ar/en/fr)
 
 Assumptions: half-duplex (one speaker), 100 ms frames, ~40 min actual speech.
