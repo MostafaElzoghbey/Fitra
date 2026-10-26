@@ -198,8 +198,9 @@ export interface TranslationProvider {
   without them; same source). In 16 kHz PCM16LE mono 100 ms chunks; out
   24 kHz PCM16LE mono (source:
   `https://ai.google.dev/gemini-api/docs/live-api/live-translate`).
-- **Fake provider**: echoes input audio tagged per language (e.g. prepends a
-  marker tone / delays), configurable `delayMs`, failure injection
+- **Fake provider**: echoes input audio upsample 16→24 kHz (per the provider
+  output contract) and optionally tagged per language (prepends a 2-byte
+  marker), configurable `delayMs`, failure injection
   (`failAfter`, `dropRate`) for tests. Default in dev/test. Optionally emits
   deterministic input/output transcripts per accepted send, opt-in via the
   `FAKE_EMIT_TRANSCRIPTS` env binding, for DO caption-routing tests; real

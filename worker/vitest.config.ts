@@ -51,6 +51,11 @@ export default defineConfig({
             miniflare: {
               bindings: {
                 JOIN_TOKEN_HMAC_SECRET: TEST_JOIN_TOKEN_SECRET,
+                // Tests stay on the fake regardless of the deploy config:
+                // wrangler.jsonc now ships TRANSLATION_PROVIDER=gemini, and an
+                // empty GEMINI_API_KEY would make ensureSessions() return null
+                // (all DO translation tests would lose their provider).
+                TRANSLATION_PROVIDER: "fake",
                 MAX_STUDENTS: 4,
                 // Caption-routing tests need a transcript-capable fake; the
                 // default fake stays silent for every other DO test.

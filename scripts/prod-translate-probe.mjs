@@ -81,11 +81,12 @@ function connect(ip, room, token, name) {
       `wss://${ip}/rooms/${encodeURIComponent(room)}/ws?token=${encodeURIComponent(token)}&name=${encodeURIComponent(name)}`,
       { servername: HOST, headers: { host: HOST } },
     );
-    const inbox = { control: [], binary: [] };
+    const inbox = { control: [], binary: [], binaryAt: [] };
     ws.on("message", (data, isBinary) => {
       const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
       if (isBinary) {
         inbox.binary.push(new Uint8Array(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength)));
+        inbox.binaryAt.push(Date.now());
       } else {
         try {
           inbox.control.push(JSON.parse(buf.toString("utf8")));
@@ -145,11 +146,25 @@ await sleep(8000);
 
 const statuses = student.inbox.control.filter((m) => m.t === "session-status");
 const errors = student.inbox.control.filter((m) => m.t === "error");
+const frames = student.inbox.binary;
+const payloadBytes = frames.map((f) => f.length - 8);
+const totalBytes = payloadBytes.reduce((sum, n) => sum + n, 0);
+const firstAt = student.inbox.binaryAt[0] ?? 0;
+const lastAt = student.inbox.binaryAt.at(-1) ?? firstAt;
+const spanMs = Math.max(1, lastAt - firstAt);
+const bytesPerSec = Math.round((totalBytes * 1000) / spanMs);
+const uniqueSizes = [...new Set(payloadBytes)];
+const echoOnly =
+  uniqueSizes.length === 1 && (uniqueSizes[0] === 3200 || uniqueSizes[0] === 4800);
+
 console.log(`session-status frames: ${JSON.stringify(statuses)}`);
 console.log(`error frames: ${JSON.stringify(errors)}`);
-console.log(`student binary frames: ${student.inbox.binary.length}`);
-if (student.inbox.binary.length > 0) {
-  const first = student.inbox.binary[0];
+console.log(`student binary frames: ${frames.length}`);
+console.log(
+  `downlink bytes: ${totalBytes} over ${spanMs}ms = ${bytesPerSec}B/s; payload sizes: ${uniqueSizes.slice(0, 6).join(",")}${uniqueSizes.length > 6 ? ",..." : ""}`,
+);
+if (frames.length > 0) {
+  const first = frames[0];
   const dv = new DataView(first.buffer, first.byteOffset, first.byteLength);
   console.log(
     `first downlink: ver=${dv.getUint8(0)} type=${dv.getUint8(1)} seq=${dv.getUint16(2, true)} speaker=${dv.getUint16(4, true)} payload=${first.length - 8}B`,
@@ -161,5 +176,21 @@ student.ws.close();
 
 const live = statuses.some((m) => m.pair === "ar->en" && m.status === "live");
 if (!live) throw new Error("FAIL: ar->en session never reached live");
-if (student.inbox.binary.length < 1) throw new Error("FAIL: student got no translated audio");
-console.log("\nPROBE PASS: ar->en live, translated downlink audio reached the student.");
+if (errors.length > 0) throw new Error(`FAIL: error frames: ${JSON.stringify(errors)}`);
+if (statuses.some((m) => m.status === "session-degraded")) {
+  throw new Error("FAIL: ar->en reported session-degraded");
+}
+if (frames.length < 10) {
+  throw new Error(`FAIL: only ${frames.length} downlink frames (expected translated stream)`);
+}
+if (echoOnly) {
+  throw new Error(
+    `FAIL: every downlink payload is ${uniqueSizes[0]}B — this is the fake provider echo, not translated audio`,
+  );
+}
+if (bytesPerSec < 40000) {
+  throw new Error(
+    `FAIL: downlink rate ${bytesPerSec}B/s < 40000 — 24 kHz PCM16 mono streams at ~48000B/s (16 kHz mislabeled plays 1.5x fast)`,
+  );
+}
+console.log("\nPROBE PASS: ar->en live, 24 kHz translated downlink audio reached the student.");

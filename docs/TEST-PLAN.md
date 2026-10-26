@@ -22,7 +22,7 @@ because the Hibernation WebSocket API only exists inside workerd. It connects
 with real `WebSocketPair`s through `env.CLASSROOM.getByName(roomCode)`, pinning
 `MAX_STUDENTS=1` and a test-only `JOIN_TOKEN_HMAC_SECRET` as Miniflare bindings.
 Drive the DO with Fake provider: join teacher+students, grant floor, push
-PCM frames, assert fan-out per language, same-language passthrough untouched,
+PCM frames, assert fan-out per language, same-language relay resampled 16→24 kHz,
 non-floor audio dropped, rate-limit trips. Hono routes tested via
 `app.request` (source: `https://hono.dev/docs/guides/testing`).
 

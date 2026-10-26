@@ -5,6 +5,7 @@
   "packageManager": "pnpm@10.0.0",
   "scripts": {
     "dev": "pnpm --filter ./web dev",
+    "dev:worker": "pnpm --filter ./web build && wrangler dev --var TRANSLATION_PROVIDER:fake",
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck",

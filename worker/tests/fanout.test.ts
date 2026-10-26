@@ -14,6 +14,7 @@ import {
 } from "@fitra/shared";
 import { afterEach, describe, expect, it } from "vitest";
 import { signJoinToken, type JoinRole } from "../src/auth/token.js";
+import { upsample16kTo24kMono } from "../src/resample.js";
 
 const SECRET = env.JOIN_TOKEN_HMAC_SECRET;
 
@@ -309,11 +310,14 @@ async function teacherTakesFloorOn(
 }
 
 function countMatchingEchoes(inbox: Inbox, payload: Uint8Array): number {
+  // The fake provider echoes 24 kHz output per the provider contract, so the
+  // downlink payload is the upsampled form of the 16 kHz uplink payload.
+  const expected = upsample16kTo24kMono(payload);
   let count = 0;
   for (const frame of inbox.binary) {
     try {
       const d = decodeAudioFrame(frame);
-      if (d.type === FITRA_AUDIO_TYPE_DOWNLINK && equalBytes(d.payload, payload)) {
+      if (d.type === FITRA_AUDIO_TYPE_DOWNLINK && equalBytes(d.payload, expected)) {
         count += 1;
       }
     } catch {
@@ -460,6 +464,7 @@ describe("ClassRoom audio fan-out (T-009, FR-015/020..025)", () => {
     // design); the frames after it must be translated and fanned out.
     const payload = new Uint8Array(160);
     for (let i = 0; i < payload.length; i += 1) payload[i] = i & 0xff;
+    const expected = upsample16kTo24kMono(payload);
     teacher.ws.send(uplinkFrame(0, payload));
     await new Promise((resolve) => setTimeout(resolve, 400));
     teacher.ws.send(uplinkFrame(1, payload));
@@ -471,16 +476,16 @@ describe("ClassRoom audio fan-out (T-009, FR-015/020..025)", () => {
           const d = decodeAudioFrame(f);
           return (
             d.type === FITRA_AUDIO_TYPE_DOWNLINK &&
-            equalBytes(d.payload, payload)
+            equalBytes(d.payload, expected)
           );
         } catch {
           return false;
         }
       },
     );
-    expect(enFrame.length).toBe(8 + payload.length);
+    expect(enFrame.length).toBe(8 + expected.length);
     const frFrame = await sFr.nextBinaryWhere((f) =>
-      equalBytes(payloadOf(f), payload),
+      equalBytes(payloadOf(f), expected),
     );
     expect(decodeAudioFrame(frFrame).type).toBe(FITRA_AUDIO_TYPE_DOWNLINK);
   });
@@ -491,11 +496,12 @@ describe("ClassRoom audio fan-out (T-009, FR-015/020..025)", () => {
     await teacherTakesFloor(teacher, sEn, sFr, sAr2);
 
     const payload = new Uint8Array(160).fill(0xab);
+    const expected = upsample16kTo24kMono(payload);
     teacher.ws.send(uplinkFrame(0, payload));
     await new Promise((resolve) => setTimeout(resolve, 400));
     teacher.ws.send(uplinkFrame(1, payload));
     // Listeners must hear it (proves the speech was fanned out at all).
-    await sEn.nextBinaryWhere((f) => equalBytes(payloadOf(f), payload));
+    await sEn.nextBinaryWhere((f) => equalBytes(payloadOf(f), expected));
 
     await teacher.quietBinary();
     await teacher.quietText();
@@ -536,6 +542,43 @@ describe("ClassRoom audio fan-out (T-009, FR-015/020..025)", () => {
     expect(view.getInt16(238, true)).toBe(0x5a5a);
     // Per-listener downlink sequencing starts at 0 for the relay leg.
     expect(decoded.seq).toBe(0);
+  });
+
+  it("splits a max-size 8192 B same-language uplink into two 24 kHz frames", async () => {
+    const room = freshRoom();
+    const { teacher, sEn, sFr, sAr2 } = await quartet(room);
+    await teacherTakesFloor(teacher, sEn, sFr, sAr2);
+
+    // 8192 B is the largest legal uplink payload; 16->24 kHz yields 12288 B,
+    // so the relay must split it (8192 + 4096) instead of hitting the codec
+    // frame-too-large rejection and dropping the frame silently.
+    const payload = new Uint8Array(8192).fill(0x3c);
+    const expected = upsample16kTo24kMono(payload);
+    expect(expected.length).toBe(12288);
+    teacher.ws.send(uplinkFrame(1, payload));
+
+    const first = await sAr2.nextBinaryWhere((f) => {
+      try {
+        return decodeAudioFrame(f).payload.length === 8192;
+      } catch {
+        return false;
+      }
+    });
+    const second = await sAr2.nextBinaryWhere((f) => {
+      try {
+        return decodeAudioFrame(f).payload.length === 4096;
+      } catch {
+        return false;
+      }
+    });
+    const a = decodeAudioFrame(first);
+    const b = decodeAudioFrame(second);
+    expect(a.type).toBe(FITRA_AUDIO_TYPE_DOWNLINK);
+    expect(b.type).toBe(FITRA_AUDIO_TYPE_DOWNLINK);
+    expect(a.seq).toBe(0);
+    expect(b.seq).toBe(1);
+    expect(equalBytes(a.payload, expected.slice(0, 8192))).toBe(true);
+    expect(equalBytes(b.payload, expected.slice(8192))).toBe(true);
   });
 
   it("non-holder binary is dropped with error{not-your-floor} (rule 6)", async () => {

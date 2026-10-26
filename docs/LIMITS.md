@@ -38,6 +38,27 @@ Either way the rule stands: never write per-chunk data anywhere.
 | Paid price (translate model) | in $3.50 or $0.0053/min; out $21.00 or $0.0315/min; ≈ $0.0368/min blended | `https://ai.google.dev/gemini-api/docs/pricing` |
 | Free tier data use | free-tier content MAY be used to improve Google products (+ human review); paid tier is not | `https://ai.google.dev/gemini-api/terms` and pricing page ("Used to improve our products: Yes" on Free) |
 
+### Provider selection and 24 kHz output contract
+
+`wrangler.jsonc` ships `TRANSLATION_PROVIDER=gemini`; production therefore runs
+the real Live Translate model. `pnpm dev:worker` builds the SPA then starts
+`wrangler dev` with `--var TRANSLATION_PROVIDER:fake`, and e2e does the same in
+`e2e/playwright.config.ts`; `worker/vitest.config.ts` pins the fake so tests
+never spend Gemini quota. Plain `wrangler dev` (no `--var`, no
+`GEMINI_API_KEY` in `.dev.vars`) selects Gemini and mutes translation legs.
+
+Every provider MUST emit **24 kHz PCM16LE mono** from `onAudio`
+(`worker/src/translation/provider.ts` + PROTOCOL §2). The fake provider echoes
+the speaker's 16 kHz uplink, so it upsamples to 24 kHz before emitting;
+same-language relay does the same in `worker/src/room.ts` (`relayAudio`).
+Sending 16 kHz bytes on the 24 kHz downlink channel plays them 1.5x fast,
++7 semitones ("wrong voice") — the exact bug fixed 2026-10-26.
+
+Timbre caveat: Live Translate performs synthesized voice replication, which the
+official docs describe as inconsistent (can drift after pauses or mis-assign
+gender). The output is not a bit-exact clone of the speaker; no `speechConfig`
+voice pinning is documented for this model.
+
 ## 3. One-hour class budget: 1 teacher + 10 students, 3 languages (ar/en/fr)
 
 Assumptions: half-duplex (one speaker), 100 ms frames, ~40 min actual speech.

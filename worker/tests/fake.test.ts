@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { upsample16kTo24kMono } from "../src/resample.js";
 import { FakeTranslationProvider } from "../src/translation/fake.js";
 import type {
   TranslationSession,
@@ -38,7 +39,7 @@ function waitFor(cond: () => boolean, timeoutMs = 2000): Promise<void> {
   });
 }
 
-function u8(buf: ArrayBuffer | undefined): number[] {
+function u8(buf: ArrayBufferLike | undefined): number[] {
   if (buf === undefined) throw new Error("expected audio chunk, got none");
   return Array.from(new Uint8Array(buf));
 }
@@ -67,7 +68,28 @@ describe("FakeTranslationProvider (T-004)", () => {
     await waitFor(() => c.audio.length === 1, delayMs + 2000);
     const elapsed = Date.now() - t0;
     expect(elapsed).toBeGreaterThanOrEqual(delayMs - 5);
-    expect(u8(c.audio[0])).toEqual([1, 2, 3, 4, 250]);
+    expect(u8(c.audio[0])).toEqual(u8(upsample16kTo24kMono(new Uint8Array([1, 2, 3, 4, 250])).buffer));
+    session.close();
+    await provider.closeAll();
+  });
+
+  it("echoes 16 kHz input upsampled to 24 kHz (4800 bytes for 1600 samples)", async () => {
+    const delayMs = 30;
+    const provider = new FakeTranslationProvider({ delayMs });
+    const c = collect();
+    const session: TranslationSession = await provider.openSession("ar", "en", c.ev);
+    await waitFor(() => c.status.includes("live"));
+    // 1600 samples = 3200 bytes of 16 kHz PCM16LE -> 2400 samples = 4800 bytes.
+    const payload = new Uint8Array(3200);
+    for (let i = 0; i < payload.length; i += 1) payload[i] = i & 0xff;
+    const input = payload.buffer as ArrayBuffer;
+    session.sendInputAudio(input.slice(0));
+    await waitFor(() => c.audio.length === 1, delayMs + 2000);
+    expect(c.audio.length).toBe(1);
+    const chunk = c.audio[0];
+    if (chunk === undefined) throw new Error("expected audio chunk");
+    expect(chunk.byteLength).toBe(4800);
+    expect(u8(chunk)).toEqual(u8(upsample16kTo24kMono(payload).buffer as ArrayBuffer));
     session.close();
     await provider.closeAll();
   });
@@ -112,9 +134,9 @@ describe("FakeTranslationProvider (T-004)", () => {
     await waitFor(
       () => c.status.filter((s) => s === "live").length >= 2,
     );
-    session.sendInputAudio(new Uint8Array([42]).buffer as ArrayBuffer);
+    session.sendInputAudio(new Uint8Array([42, 0]).buffer as ArrayBuffer);
     await waitFor(() => c.audio.length === 1);
-    expect(u8(c.audio[0])).toEqual([42]);
+    expect(u8(c.audio[0])).toEqual([42, 0]);
     session.close();
     await provider.closeAll();
   });
@@ -124,12 +146,12 @@ describe("FakeTranslationProvider (T-004)", () => {
     const c = collect();
     const session = await provider.openSession("ar", "en", c.ev);
     await waitFor(() => c.status.includes("live"));
-    session.sendInputAudio(new Uint8Array([1]).buffer as ArrayBuffer);
+    session.sendInputAudio(new Uint8Array([1, 0]).buffer as ArrayBuffer);
     session.endInput();
-    session.sendInputAudio(new Uint8Array([2]).buffer as ArrayBuffer);
+    session.sendInputAudio(new Uint8Array([2, 0]).buffer as ArrayBuffer);
     await waitFor(() => c.audio.length === 2);
-    expect(u8(c.audio[0])).toEqual([1]);
-    expect(u8(c.audio[1])).toEqual([2]);
+    expect(u8(c.audio[0])).toEqual([1, 0]);
+    expect(u8(c.audio[1])).toEqual([2, 0]);
     session.close();
     await provider.closeAll();
   });

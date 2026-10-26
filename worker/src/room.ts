@@ -873,21 +873,28 @@ export class ClassRoom {
     // raised pitch, choppy buffering).
     const upsampled = upsample16kTo24kMono(payload);
     if (upsampled.length === 0) return;
-    const seq = this.outSeq.get(member.pid) ?? 0;
-    let relay: Uint8Array;
-    try {
-      relay = encodeAudioFrame({
-        type: FITRA_AUDIO_TYPE_DOWNLINK,
-        seq,
-        speaker: holder.index,
-        payload: upsampled,
-      });
-    } catch {
-      this.audioDrops += 1;
-      return;
+    // A legal 8192-byte uplink becomes 12288 bytes after upsampling, which
+    // the codec rejects as frame-too-large. Split exactly like translated
+    // audio so large same-language frames are not silently dropped.
+    const pieces = splitPayloadForWire(upsampled);
+    let seq = this.outSeq.get(member.pid) ?? 0;
+    for (const piece of pieces) {
+      let relay: Uint8Array;
+      try {
+        relay = encodeAudioFrame({
+          type: FITRA_AUDIO_TYPE_DOWNLINK,
+          seq,
+          speaker: holder.index,
+          payload: piece,
+        });
+      } catch {
+        this.audioDrops += 1;
+        continue;
+      }
+      seq = nextAudioSeq(seq);
+      this.trySend(ws, relay);
     }
-    this.outSeq.set(member.pid, nextAudioSeq(seq));
-    this.trySend(ws, relay);
+    this.outSeq.set(member.pid, seq);
   }
 
   /** Floor grants open the pair set eagerly (ensureSession effect) so the

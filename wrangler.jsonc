@@ -6,7 +6,10 @@
   "durable_objects": { "bindings": [{ "name": "CLASSROOM", "class_name": "ClassRoom" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ClassRoom"] }],
   "vars": {
-    "TRANSLATION_PROVIDER": "fake",    "SUPPORTED_LANGUAGES": ["ar", "en", "fr", "es"],
+    // Production MUST run Gemini: the fake provider only echoes the speaker.
+    // Local dev / e2e override this with `--var TRANSLATION_PROVIDER:fake`.
+    "TRANSLATION_PROVIDER": "gemini",
+    "SUPPORTED_LANGUAGES": ["ar", "en", "fr", "es"],
     "MAX_STUDENTS": 30,
     "MAX_TRANSLATION_SESSIONS": 8,
     "SESSION_IDLE_CLOSE_S": 60,

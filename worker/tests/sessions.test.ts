@@ -157,7 +157,7 @@ describe("SessionManager (T-008)", () => {
     expect(events).toHaveLength(eventsBefore);
 
     // Existing sessions are unaffected.
-    teacher.session.sendInputAudio(new Uint8Array([3]).buffer as ArrayBuffer);
+    teacher.session.sendInputAudio(new Uint8Array([3, 0]).buffer as ArrayBuffer);
     await vi.advanceTimersByTimeAsync(10);
     expect(audio).toHaveLength(audioBefore + 1);
   });

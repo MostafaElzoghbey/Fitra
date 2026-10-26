@@ -4,6 +4,7 @@ import type {
   TranslationSession,
   TranslationSessionEvents,
 } from "./provider.js";
+import { upsample16kTo24kMono } from "../resample.js";
 
 // Inline copy of the onStatus union from provider.ts (kept in sync by hand;
 // provider.ts itself stays VERBATIM per ARCHITECTURE.md section 4).
@@ -24,11 +25,13 @@ export interface FakeProviderOptions {
 type Timer = ReturnType<typeof setTimeout>;
 
 // Design choices (documented per T-004):
-// - Echo prepends NOTHING by default so byte-equality holds for loopback
-//   tests. With tagLanguage=true we prefix a 2-byte tag = the first two
-//   char codes of the target BCP-47 code (e.g. "en" -> [0x65, 0x6e]) so fan-out
-//   tests (T-009) can tell which target leg an echo belongs to. Padding with
-//   0x00 when the code is shorter than 2 chars.
+// - The echo is the 16 kHz uplink snapshot RESAMPLED to 24 kHz PCM16LE mono
+//   (upsample16kTo24kMono) per the provider output contract: onAudio delivers
+//   24 kHz bytes, which room.ts forwards as 24 kHz downlink frames. With
+//   tagLanguage=true the 2-byte tag is prefixed to the 24 kHz output. The tag
+//   = the first two char codes of the target BCP-47 code (e.g. "en" ->
+//   [0x65, 0x6e]) so fan-out tests (T-009) can tell which target leg an echo
+//   belongs to. Padding with 0x00 when the code is shorter than 2 chars.
 // - Status lifecycle: onStatus("connecting") fires synchronously inside
 //   openSession, onStatus("live") follows on the next macrotask. This keeps
 //   "connecting" observable even when callers await openSession.
@@ -110,7 +113,12 @@ export class FakeTranslationSession implements TranslationSession {
     }
     // Copy at send time so later caller mutation cannot corrupt the echo.
     const snapshot: ArrayBuffer = pcm16kMono.slice(0);
-    const out: ArrayBuffer = this.tagLanguage ? withTag(snapshot, this.targetLang) : snapshot;
+    // Provider output contract: onAudio delivers 24 kHz PCM16LE mono.
+    const up = upsample16kTo24kMono(new Uint8Array(snapshot));
+    if (up.length === 0) return;
+    const out: ArrayBuffer = this.tagLanguage
+      ? withTag(up.buffer as ArrayBuffer, this.targetLang)
+      : (up.buffer as ArrayBuffer);
     const t = setTimeout(() => {
       this.pending.delete(t);
       if (this.closed || this.failed) return;
