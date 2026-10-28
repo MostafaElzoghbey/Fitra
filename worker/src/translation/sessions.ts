@@ -306,6 +306,11 @@ export class SessionManager {
     }
   }
 
+  /** Flush buffered input on every open pair (speaker paused mid-sentence). */
+  endInputAll(): void {
+    for (const entry of this.entries.values()) entry.underlying?.endInput();
+  }
+
   /** Shutdown path for room teardown: clears timers, closes all sessions. */
   closeAll(): Promise<void> {
     for (const entry of this.entries.values()) {

@@ -104,15 +104,22 @@ reports itself instead of dropping input silently (NFR-001).
   interrupted turn commits its partial segment as `final:true` rather than
   sending an empty final.
 - Routing is per translation pair, never broadcast: both `output` captions
-  (translated text) and `input` captions (source-speech transcription) go
-  only to live sockets whose membership `lang` equals the pair's target
-  language. The source speaker and same-language listeners are excluded
-  automatically — a pair's target always differs from its source, and
-  same-language listeners receive the un-relayed audio instead.
+  (translated text) and `input` captions (source-speech transcription) go to
+  live sockets whose membership `lang` equals the pair's target language, and
+  to the pair's current source speaker. The speaker sees the original and
+  translated text of their own turn but never its translated audio (FR-015).
+  Same-language listeners other than the speaker stay excluded — they receive
+  the un-relayed audio instead. With multiple target languages the speaker
+  receives one caption stream per pair (latest live value per kind wins;
+  each final is committed).
 - A listener belongs to exactly one pair at a time (their own language vs the
   current speaker's), so each listener receives at most one input and one
   output caption stream per turn. No caption data is persisted anywhere
   (memory only, AGENTS.md rule 2).
+- `speaking-stop` flushes the provider input (`realtimeInput.audioStreamEnd`)
+  so speech captured before the button was released is translated. Floor
+  release never cancels in-flight translated audio; only the tab that held
+  the floor drops its own playback.
 
 ## 3.2 Roster synchronisation
 

@@ -22,8 +22,8 @@ Related server data (not states): `raisedHands: pid[]` (FIFO queue),
 |---|---|---|---|---|---|
 | 1 | IDLE | teacher `speaking-start` | TEACHER_SPEAKING | `floor-changed{teacher}` | — |
 | 2 | IDLE | grant(pid) (auto or manual) | STUDENT_SPEAKING(pid) | `floor-changed{student pid}` | Dequeues pid from hands |
-| 3 | TEACHER_SPEAKING | teacher `speaking-stop` / disconnect | IDLE | `floor-changed{none}` | Sessions idle-close |
-| 4 | STUDENT_SPEAKING(p) | speaker `speaking-stop` / revoke / disconnect | IDLE | `floor-changed{none}` | Revoke is teacher-only |
+| 3 | TEACHER_SPEAKING | teacher `speaking-stop` / disconnect | IDLE | `floor-changed{none}` | Input flushed; sessions idle-close later |
+| 4 | STUDENT_SPEAKING(p) | speaker `speaking-stop` / revoke / disconnect | IDLE | `floor-changed{none}` | Input flushed; revoke is teacher-only |
 | 5 | STUDENT_SPEAKING(p) | teacher `speaking-start` | TEACHER_SPEAKING | `floor-changed{teacher, preempted:p}` | Teacher always preempts; p must re-raise |
 | 6 | ANY | student audio without floor | (no change) | `error{not-your-floor}` to sender | Frame dropped, violation counted |
 | 7 | IDLE/STUDENT_* | raise-hand(q) | (no change) | `hands` update | Duplicates ignored; `autoGrant`+IDLE → rule 2 immediately |
@@ -40,6 +40,11 @@ Related server data (not states): `raisedHands: pid[]` (FIFO queue),
   no tie possible).
 - **Speaker disconnects mid-sentence**: rules 3/4/11; sessions using that
   speaker as source are released; listeners hear silence (no filler audio).
+- **Speaker stops mid-sentence (still connected)**: `speaking-stop` flushes
+  the provider input, and the translated tail keeps flowing to listeners after
+  the floor becomes IDLE. A client interrupts its own playback only when the
+  tab itself loses a floor it held — never merely because the floor became
+  IDLE or moved to another participant.
 - **Teacher disconnects**: translation stops (no source), room state retained
   in DO memory/SQLite; on teacher rejoin (same room code + `teacher` role +
   valid token) state resumes at IDLE. A teacher REPLACING their own socket

@@ -78,7 +78,8 @@ end to end as early as possible.
 - **FR-013** The teacher speaking always preempts: teacher audio/start takes
   the floor immediately, revoking any student floor.
 - **FR-014** The teacher may `revoke` the floor at any time.
-- **FR-015** A speaker never receives the translation of their own speech.
+- **FR-015** A speaker never receives the translated audio of their own
+  speech (they do receive its captions, FR-034).
 - **FR-016** Every floor transition is broadcast to all room clients
   (`floor-changed` event); full table and edge cases in
   `docs/FLOOR-CONTROL.md`.
@@ -128,8 +129,9 @@ end to end as early as possible.
   when the engine returns them (`inputAudioTranscription` /
   `outputAudioTranscription` top-level placement probe-confirmed, see
   OQ-01). Routing: `output` and `input` captions both go to the pair's
-  target-language sockets (PROTOCOL.md section 3.1). Memory only — no
-  caption data is ever persisted.
+  target-language sockets and to the pair's source speaker, so the sender sees
+  their own original and translated text (PROTOCOL.md section 3.1). Memory
+  only — no caption data is ever persisted.
 - **FR-035** Caption display MUST treat `final:false` as a live replacement of
   the current segment for that `kind` and `final:true` as the commit of that
   segment (never overwrite a committed segment with the next interim one).

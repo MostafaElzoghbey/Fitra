@@ -177,6 +177,7 @@ class GeminiTranslationSession implements TranslationSession {
   private pendingAudio: ArrayBuffer[] = [];
   private inputSegment = "";
   private outputSegment = "";
+  private pendingStreamEnd = false;
   private latestHandle: string | null;
 
   constructor(
@@ -261,6 +262,10 @@ class GeminiTranslationSession implements TranslationSession {
             } catch {
               break;
             }
+          }
+          if (this.pendingStreamEnd) {
+            this.pendingStreamEnd = false;
+            this.sendStreamEnd();
           }
           if (!this.settled) {
             this.settled = true;
@@ -362,7 +367,20 @@ class GeminiTranslationSession implements TranslationSession {
   }
 
   endInput(): void {
-    // Translation is streaming; nothing to flush. Session stays warm.
+    if (this.dead) return;
+    if (!this.opened || !this.settled) {
+      this.pendingStreamEnd = true;
+      return;
+    }
+    this.sendStreamEnd();
+  }
+
+  private sendStreamEnd(): void {
+    try {
+      this.socket?.send(JSON.stringify({ realtimeInput: { audioStreamEnd: true } }));
+    } catch {
+      // The socket is already failing; the close path owns the retry.
+    }
   }
 
   close(): void {

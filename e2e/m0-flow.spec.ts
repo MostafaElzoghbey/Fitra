@@ -163,6 +163,9 @@ test("M0 acceptance: teacher speaks, hand, grant, student speaks, revoke", async
     // Live translation pairs, one per distinct student language (FR-022).
     await expect(teacher.getByTestId("session-ar->en")).toBeVisible();
     await expect(teacher.getByTestId("session-ar->fr")).toBeVisible();
+    // The speaker sees their own original and translated text (FR-034).
+    await expect(teacher.getByTestId("caption-live-input")).toContainText(/in\d+/);
+    await expect(teacher.getByTestId("caption-live-output")).toContainText(/out\d+/);
 
     // --- raise hand -> grant -> student speaks -> teacher receives ----------
     await teacher.getByTestId("mic-toggle").click();

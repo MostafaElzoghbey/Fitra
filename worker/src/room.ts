@@ -637,6 +637,7 @@ export class ClassRoom {
     for (const effect of effects) {
       switch (effect.kind) {
         case "releaseSessionsFor":
+          this.sessions?.endInputAll();
           this.sessions?.release(effect.participantId);
           break;
         case "releaseAllSessions": {
@@ -1007,6 +1008,7 @@ export class ClassRoom {
     const sep = pair.indexOf("->");
     if (sep < 0) return;
     const targetLang = pair.slice(sep + 2);
+    const speaker = this.pairSpeaker.get(pair) ?? TEACHER_INDEX;
     const langs = this.memberLangs();
     const msg = JSON.stringify({
       t: "caption",
@@ -1017,7 +1019,7 @@ export class ClassRoom {
     for (const { ws, member } of this.liveSockets()) {
       const lang = langs.get(member.pid);
       if (lang === undefined) continue;
-      if (lang === targetLang) this.trySend(ws, msg);
+      if (lang === targetLang || member.index === speaker) this.trySend(ws, msg);
     }
   }
 

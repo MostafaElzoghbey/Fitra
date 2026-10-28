@@ -216,6 +216,7 @@ class ScriptedProvider implements TranslationProvider {
   readonly name = "fake" as const;
   events: TranslationSessionEvents | null = null;
   closedAll = false;
+  endInputCalls = 0;
   readonly calls: Array<{
     sourceLang: Lang;
     targetLang: Lang;
@@ -234,7 +235,9 @@ class ScriptedProvider implements TranslationProvider {
       sourceLang,
       targetLang,
       sendInputAudio: (): void => undefined,
-      endInput: (): void => undefined,
+      endInput: (): void => {
+        this.endInputCalls += 1;
+      },
       close: (): void => undefined,
     };
     return Promise.resolve(session);
@@ -318,6 +321,16 @@ describe("SessionManager transcript + goAway forwarding (latency/quality M0.5)",
     ev.onGoAway?.(60_000);
     expect(goAways).toEqual([{ pair: "ar->fr", ms: 60_000 }]);
     expect(statuses).toEqual(["reconnecting"]);
+  });
+
+  it("endInputAll flushes every open pair", async () => {
+    const provider = new ScriptedProvider();
+    const manager = new SessionManager(provider, {});
+    manager.acquire("ar", "en", "listener-1", { isTeacherLeg: false });
+    manager.acquire("ar", "fr", "listener-2", { isTeacherLeg: false });
+    await vi.advanceTimersByTimeAsync(0);
+    manager.endInputAll();
+    expect(provider.endInputCalls).toBe(2);
   });
 
   it("replays the latest resumption handle when it reopens after a failure", async () => {

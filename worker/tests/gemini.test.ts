@@ -279,6 +279,55 @@ describe("GeminiTranslationProvider (T-015)", () => {
     await provider.closeAll();
   });
 
+  it("flushes buffered input with audioStreamEnd on endInput", async () => {
+    const sockets: FakeGeminiSocket[] = [];
+    const provider = new GeminiTranslationProvider("test-key", {
+      createSocket: (url) => {
+        const socket = new FakeGeminiSocket(url);
+        sockets.push(socket);
+        return socket;
+      },
+    });
+    const c = collect();
+    const session = await provider.openSession("ar", "en", c.ev);
+    sockets[0]?.serverOpen();
+    sockets[0]?.serverText({ setupComplete: {} });
+    session.endInput();
+    const frame = JSON.parse(sockets[0]?.sent.at(-1) ?? "") as {
+      realtimeInput?: { audioStreamEnd?: boolean };
+    };
+    expect(frame.realtimeInput?.audioStreamEnd).toBe(true);
+    session.close();
+    await provider.closeAll();
+  });
+
+  it("defers audioStreamEnd until setupComplete", async () => {
+    const sockets: FakeGeminiSocket[] = [];
+    const provider = new GeminiTranslationProvider("test-key", {
+      createSocket: (url) => {
+        const socket = new FakeGeminiSocket(url);
+        sockets.push(socket);
+        return socket;
+      },
+    });
+    const c = collect();
+    const session = await provider.openSession("ar", "en", c.ev);
+    sockets[0]?.serverOpen();
+    session.endInput();
+    expect(sockets[0]?.sent).toHaveLength(1);
+    sockets[0]?.serverText({ setupComplete: {} });
+    const sent = sockets[0]?.sent ?? [];
+    expect(
+      sent.some(
+        (raw) =>
+          (JSON.parse(raw) as { realtimeInput?: { audioStreamEnd?: boolean } })
+            .realtimeInput?.audioStreamEnd === true,
+      ),
+    ).toBe(true);
+    session.close();
+    await provider.closeAll();
+  });
+
   it("opens top-level first and retries documented placement after a pre-setup close", async () => {
     const sockets: FakeGeminiSocket[] = [];
     const provider = new GeminiTranslationProvider("test-key", {

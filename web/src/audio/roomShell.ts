@@ -13,6 +13,7 @@
 
 import { decodeAudioFrame, type FloorHolder } from "@fitra/shared";
 import type { RoomSocket } from "../net/socket.js";
+import { floorLost } from "./floorGate.js";
 import {
   AudioFrameSender,
   createAudioInjector,
@@ -97,16 +98,6 @@ function createSink(): PlaybackSink {
   }
 }
 
-/** True when the new floor no longer belongs to this tab. */
-function floorMovedAway(
-  floor: FloorHolder,
-  role: "teacher" | "student",
-  selfId: string | null,
-): boolean {
-  if (role === "teacher") return floor.kind !== "teacher";
-  return !(floor.kind === "student" && floor.participantId === selfId);
-}
-
 export function attachRoomAudio(
   socket: RoomSocket,
   options: RoomAudioOptions = {},
@@ -128,6 +119,7 @@ export function attachRoomAudio(
   const sender = new AudioFrameSender(adapter);
   const sink = createSink();
   let selfId: string | null = null;
+  let lastFloor: FloorHolder | null = null;
   let role: "teacher" | "student" = "student";
   let receivedCount = 0;
   let injector: AudioInjector | null = null;
@@ -150,11 +142,13 @@ export function attachRoomAudio(
     if (disposed) return;
     if (msg.t === "welcome") {
       selfId = msg.participantId;
+      lastFloor = msg.floor;
       sender.setSpeakerIndex(msg.participantIndex);
       return;
     }
-    if (msg.t === "floor-changed" && floorMovedAway(msg.floor, role, selfId)) {
-      sink.interrupt();
+    if (msg.t === "floor-changed") {
+      if (floorLost(lastFloor, msg.floor, role, selfId)) sink.interrupt();
+      lastFloor = msg.floor;
     }
   });
   // Role arrives via the room route, not the wire: infer it from the roster

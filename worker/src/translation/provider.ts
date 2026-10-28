@@ -17,7 +17,7 @@ export interface TranslationSession {
   readonly sourceLang: Lang;
   readonly targetLang: Lang;
   sendInputAudio(pcm16kMono: ArrayBuffer): void; // 16kHz PCM16LE mono, ~100ms
-  endInput(): void;   // speaker paused; keep session warm until idle timeout
+  endInput(): void;   // flush buffered speech; keep session warm until idle timeout
   close(): void;
 }
 

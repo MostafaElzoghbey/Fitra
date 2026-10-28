@@ -35,6 +35,7 @@ Each task ≤ half a day, independently testable, with acceptance + proving test
 | T-022 | Capture Gemini `sessionResumptionUpdate` handles and pass them on reconnect; surface `GoAway` as `reconnecting` with attempt; no behaviour depends on context surviving | Handle captured per session, resent on reconnect, stale-generation updates ignored | `worker/tests/gemini.test.ts` + `sessions.test.ts` |
 | T-023 | UI copy pass: "voice is generated" note, headphones hint, no voice/tone/glossary controls | Arabic + English strings agree; no control exists for an undocumented capability | E2E + review |
 | T-024 | Panel shows server sessions and real rates (replace the "server gap" expectation in `e2e/m0-flow.spec.ts`) | `metric-sessions` rows carry `data-status="live"` | E2E |
+| T-025 | Mic-off tail + sender captions: `speaking-stop` flushes provider input (`audioStreamEnd`); floor changes never interrupt listeners' playback; the source speaker also receives their own `input`/`output` captions | Buffered speech still translates after mic-off; listeners hear the tail; speaker sees both caption kinds; same-language non-speakers stay excluded | `worker/tests/{gemini,sessions,fanout}.test.ts` + `web/tests/floor-gate.test.ts` + E2E |
 
 M0 acceptance (end to end): teacher tab (ar) speaks → student tab (en) hears
 English; student raises hand → granted → speaks → teacher hears Arabic;

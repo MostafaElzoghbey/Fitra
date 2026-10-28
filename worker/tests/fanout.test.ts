@@ -385,7 +385,7 @@ describe("pair-fanout dedupe, pre-warm, captions, rejoin (latency/quality M0.5)"
     await statusFor(sFr, "ar->fr");
   });
 
-  it("routes captions: both kinds to target-lang members, never to speaker/same-lang", async () => {
+  it("routes captions: both kinds to target-lang members and the speaker, never same-lang listeners", async () => {
     const room = freshRoom();
     const { teacher, sEn, sFr, sAr2 } = await quartet(room);
     await teacherTakesFloor(teacher, sEn, sFr, sAr2);
@@ -405,9 +405,12 @@ describe("pair-fanout dedupe, pre-warm, captions, rejoin (latency/quality M0.5)"
       expect(typeof cap.text).toBe("string");
       expect(cap.text.length).toBeGreaterThan(0);
     }
-    // Same-lang listeners (incl. the speaker) get neither kind.
+    // Same-lang listeners that are not the speaker get neither kind.
     expect(captionsOf(sAr2)).toEqual([]);
-    expect(captionsOf(teacher)).toEqual([]);
+    // The speaker sees their own original and translated text.
+    const teacherCaptions = captionsOf(teacher);
+    expect(teacherCaptions.some((c) => c.kind === "input")).toBe(true);
+    expect(teacherCaptions.some((c) => c.kind === "output")).toBe(true);
     // Per-pair output routing: the fr pair targets fr.
     expect(captionsOf(sFr).some((c) => c.kind === "output")).toBe(true);
   });
