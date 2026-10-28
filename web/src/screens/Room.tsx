@@ -31,6 +31,7 @@ import { rejoinRoom } from "../net/api.js";
 import { attachRoomAudio, type RoomAudioHandle } from "../audio/roomShell.js";
 import { captureNoticeKey, type CaptureNotice } from "../audio/devices.js";
 import { navigate, type RoomRouteParams } from "../router.js";
+import { emptyCaptions, reduceCaption, type CaptionsState } from "../captions.js";
 
 export interface RoomProps {
   readonly session: RoomRouteParams;
@@ -49,8 +50,7 @@ interface RoomState {
   readonly raised: readonly string[];
   readonly sessions: Readonly<Record<string, SessionStatus>>;
   readonly metrics: RoomMetrics | null;
-  readonly captionInput: string;
-  readonly captionOutput: string;
+  readonly captions: CaptionsState;
   readonly errorCode: string | null;
   readonly connected: boolean;
 }
@@ -62,8 +62,7 @@ const INITIAL_STATE: RoomState = {
   raised: [],
   sessions: {},
   metrics: null,
-  captionInput: "",
-  captionOutput: "",
+  captions: emptyCaptions(),
   errorCode: null,
   connected: false,
 };
@@ -88,9 +87,7 @@ function reduceServerMsg(state: RoomState, msg: ServerMsg): RoomState {
         sessions: { ...state.sessions, [msg.pair]: msg.status },
       };
     case "caption":
-      return msg.kind === "input"
-        ? { ...state, captionInput: msg.text }
-        : { ...state, captionOutput: msg.text };
+      return { ...state, captions: reduceCaption(state.captions, msg) };
     case "metrics":
       return { ...state, metrics: msg.m };
     case "error":
@@ -282,7 +279,7 @@ export function Room({
             </p>
           )}
 
-          <CaptionPanel strings={strings} input={state.captionInput} output={state.captionOutput} />
+          <CaptionPanel strings={strings} captions={state.captions} />
 
           <SessionPanel strings={strings} sessions={state.sessions} />
         </div>
@@ -318,31 +315,70 @@ export function Room({
 
 function CaptionPanel({
   strings,
-  input,
-  output,
+  captions,
 }: {
   readonly strings: UiStrings;
-  readonly input: string;
-  readonly output: string;
+  readonly captions: CaptionsState;
 }): React.JSX.Element {
+  const { live, history } = captions;
+  const empty = live.input === "" && live.output === "" && history.length === 0;
   return (
     <section className="ui-card p-4" aria-label={strings.captionsTitle}>
       <h2 className="ui-section-title">{strings.captionsTitle}</h2>
-      {input === "" && output === "" ? (
+      {empty ? (
         <p className="ui-hint mt-2" data-testid="captions-empty">
           {strings.captionsEmpty}
         </p>
       ) : (
         <div className="mt-3 space-y-2" data-testid="captions">
-          {output !== "" && (
-            <p className="rounded-md bg-brand-50 p-3 text-sm leading-relaxed text-ink-800">
-              {output}
+          {live.input !== "" && (
+            <p
+              className="line-clamp-2 rounded-md bg-paper-sunk p-3 text-sm leading-relaxed text-ink-600"
+              data-testid="caption-live-input"
+            >
+              <span className="me-2 text-xs font-semibold text-ink-500">
+                {strings.captionsInputLabel}
+              </span>
+              {live.input}
             </p>
           )}
-          {input !== "" && (
-            <p className="rounded-md bg-paper-sunk p-3 text-sm leading-relaxed text-ink-600">
-              {input}
+          {live.output !== "" && (
+            <p
+              className="line-clamp-2 rounded-md bg-brand-50 p-3 text-sm leading-relaxed text-ink-800"
+              data-testid="caption-live-output"
+            >
+              <span className="me-2 text-xs font-semibold text-ink-500">
+                {strings.captionsOutputLabel}
+              </span>
+              {live.output}
             </p>
+          )}
+          {history.length > 0 && (
+            <div
+              className="max-h-48 space-y-2 overflow-y-auto"
+              data-testid="caption-history"
+              aria-live="polite"
+            >
+              {history.map((segment, index) => (
+                <p
+                  key={index}
+                  className={
+                    segment.kind === "output"
+                      ? "text-sm leading-relaxed text-ink-800"
+                      : "text-sm leading-relaxed text-ink-500"
+                  }
+                  data-testid={`caption-history-${index}`}
+                  data-kind={segment.kind}
+                >
+                  <span className="me-2 text-xs font-semibold text-ink-400">
+                    {segment.kind === "output"
+                      ? strings.captionsOutputLabel
+                      : strings.captionsInputLabel}
+                  </span>
+                  {segment.text}
+                </p>
+              ))}
+            </div>
           )}
         </div>
       )}

@@ -191,6 +191,8 @@ export interface UiStrings {
   readonly testDeploymentBadge: string;
   readonly captionsTitle: string;
   readonly captionsEmpty: string;
+  readonly captionsInputLabel: string;
+  readonly captionsOutputLabel: string;
   readonly sessionsTitle: string;
   readonly sessionsEmpty: string;
   readonly statusConnecting: string;
@@ -366,6 +368,8 @@ const STRINGS: Record<SupportedUiLang, UiStrings> = {
     testDeploymentBadge: "نشر تجريبي — ترجمة ذكاء اصطناعي، بلا تسجيل من طرفنا",
     captionsTitle: "الترجمة النصية",
     captionsEmpty: "لا تتوفّر ترجمة نصية في هذا المحرك بعد.",
+    captionsInputLabel: "كلام المتحدّث",
+    captionsOutputLabel: "الترجمة",
     sessionsTitle: "جلسات الترجمة",
     sessionsEmpty: "لا توجد جلسات بعد.",
     statusConnecting: "جارٍ الاتصال",
@@ -541,6 +545,8 @@ const STRINGS: Record<SupportedUiLang, UiStrings> = {
       "Test deployment — AI-translated, not recorded by us",
     captionsTitle: "Captions",
     captionsEmpty: "This engine does not provide transcripts yet.",
+    captionsInputLabel: "Speaker",
+    captionsOutputLabel: "Translated",
     sessionsTitle: "Translation sessions",
     sessionsEmpty: "No sessions yet.",
     statusConnecting: "Connecting",
@@ -717,6 +723,8 @@ const STRINGS: Record<SupportedUiLang, UiStrings> = {
       "Déploiement de test — traduit par IA, non enregistré par nos soins",
     captionsTitle: "Sous-titres",
     captionsEmpty: "Ce moteur ne fournit pas encore de transcription.",
+    captionsInputLabel: "Orateur",
+    captionsOutputLabel: "Traduction",
     sessionsTitle: "Sessions de traduction",
     sessionsEmpty: "Aucune session pour l’instant.",
     statusConnecting: "Connexion",
@@ -893,6 +901,8 @@ const STRINGS: Record<SupportedUiLang, UiStrings> = {
       "Despliegue de prueba — traducido por IA, no lo grabamos",
     captionsTitle: "Subtítulos",
     captionsEmpty: "Este motor todavía no ofrece transcripción.",
+    captionsInputLabel: "Ponente",
+    captionsOutputLabel: "Traducción",
     sessionsTitle: "Sesiones de traducción",
     sessionsEmpty: "Aún no hay sesiones.",
     statusConnecting: "Conectando",
