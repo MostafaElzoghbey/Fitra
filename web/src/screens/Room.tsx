@@ -263,6 +263,12 @@ export function Room({
             <span>
               {strings.headphonesHint}
               <span className="mt-1 block text-ink-600">{strings.micHint}</span>
+              <span
+                className="mt-1 block text-ink-600"
+                data-testid="generated-voice-note"
+              >
+                {strings.generatedVoiceNote}
+              </span>
             </span>
           </p>
 
