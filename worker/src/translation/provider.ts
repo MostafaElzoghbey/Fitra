@@ -9,6 +9,8 @@ export interface TranslationSessionEvents {
   onTranscript?: (kind: "input" | "output", text: string, final: boolean) => void;
   onStatus: (s: "connecting" | "live" | "reconnecting" | "failed", detail?: string) => void;
   onGoAway?: (timeLeftMs: number) => void;
+  /** Latest SessionResumptionUpdate handle; replay it on the next open. */
+  onResumption?: (handle: string) => void;
 }
 
 export interface TranslationSession {
@@ -21,6 +23,11 @@ export interface TranslationSession {
 
 export interface TranslationProvider {
   readonly name: "gemini-live-translate" | "fake";
-  openSession(sourceLang: Lang, targetLang: Lang, ev: TranslationSessionEvents): Promise<TranslationSession>;
+  openSession(
+    sourceLang: Lang,
+    targetLang: Lang,
+    ev: TranslationSessionEvents,
+    resumeHandle?: string,
+  ): Promise<TranslationSession>;
   closeAll(): Promise<void>;
 }

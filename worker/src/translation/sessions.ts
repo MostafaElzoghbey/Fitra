@@ -160,6 +160,8 @@ interface SessionEntry {
   opening: boolean;
   /** Wall-clock time of the latest "live" status; null while not live. */
   liveSinceMs: number | null;
+  /** Latest Gemini resumption handle, replayed on every reopen (T-022). */
+  resumeHandle: string | null;
   readonly handle: ManagedSession;
   underlying: TranslationSession | null;
   /** Bumped per open so stale event callbacks / late resolves are ignored. */
@@ -281,6 +283,7 @@ export class SessionManager {
       terminallyFailed: false,
       opening: false,
       liveSinceMs: null,
+      resumeHandle: null,
       handle: new ManagedSession(sourceLang, targetLang),
       underlying: null,
       generation: 0,
@@ -324,7 +327,12 @@ export class SessionManager {
     const ev = this.makeEvents(entry, gen);
     let opened: Promise<TranslationSession>;
     try {
-      opened = this.provider.openSession(entry.sourceLang, entry.targetLang, ev);
+      opened = this.provider.openSession(
+        entry.sourceLang,
+        entry.targetLang,
+        ev,
+        entry.resumeHandle ?? undefined,
+      );
     } catch {
       this.onOpenSettled(entry, gen, null);
       return;
@@ -372,6 +380,11 @@ export class SessionManager {
       onGoAway: (timeLeftMs) => {
         if (!this.isCurrent(entry, gen)) return;
         this.onGoAway?.(entry.key, timeLeftMs);
+        this.emit(entry.key, "reconnecting", entry.attempts);
+      },
+      onResumption: (handle) => {
+        if (!this.isCurrent(entry, gen)) return;
+        entry.resumeHandle = handle;
       },
       onStatus: (s: ProviderLiveStatus | "failed") => {
         if (!this.isCurrent(entry, gen)) return;

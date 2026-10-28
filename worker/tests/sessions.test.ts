@@ -216,12 +216,19 @@ class ScriptedProvider implements TranslationProvider {
   readonly name = "fake" as const;
   events: TranslationSessionEvents | null = null;
   closedAll = false;
+  readonly calls: Array<{
+    sourceLang: Lang;
+    targetLang: Lang;
+    resumeHandle: string | undefined;
+  }> = [];
 
   openSession(
     sourceLang: Lang,
     targetLang: Lang,
     ev: TranslationSessionEvents,
+    resumeHandle?: string,
   ): Promise<TranslationSession> {
+    this.calls.push({ sourceLang, targetLang, resumeHandle });
     this.events = ev;
     const session: TranslationSession = {
       sourceLang,
@@ -296,7 +303,11 @@ describe("SessionManager transcript + goAway forwarding (latency/quality M0.5)",
   it("forwards goAway with pair and remaining time", async () => {
     const provider = new ScriptedProvider();
     const goAways: Array<{ pair: string; ms: number }> = [];
+    const statuses: string[] = [];
     const manager = new SessionManager(provider, {
+      onSessionStatus: (_pair, status) => {
+        statuses.push(status);
+      },
       onGoAway: (pair, ms) => {
         goAways.push({ pair, ms });
       },
@@ -306,6 +317,32 @@ describe("SessionManager transcript + goAway forwarding (latency/quality M0.5)",
     if (ev === null) throw new Error("provider never got events");
     ev.onGoAway?.(60_000);
     expect(goAways).toEqual([{ pair: "ar->fr", ms: 60_000 }]);
+    expect(statuses).toEqual(["reconnecting"]);
+  });
+
+  it("replays the latest resumption handle when it reopens after a failure", async () => {
+    const provider = new ScriptedProvider();
+    const manager = new SessionManager(provider, {});
+    manager.acquire("ar", "en", "listener-1", { isTeacherLeg: false });
+    const ev = provider.events;
+    if (ev === null) throw new Error("provider never got events");
+    ev.onResumption?.("h1");
+    ev.onStatus("failed");
+    await vi.advanceTimersByTimeAsync(250);
+    expect(provider.calls).toHaveLength(2);
+    expect(provider.calls[1]?.resumeHandle).toBe("h1");
+  });
+
+  it("drops resumption handles from a torn-down entry", async () => {
+    const provider = new ScriptedProvider();
+    const manager = new SessionManager(provider, {});
+    manager.acquire("ar", "en", "listener-1", { isTeacherLeg: false });
+    const ev = provider.events;
+    if (ev === null) throw new Error("provider never got events");
+    await manager.closeAll();
+    ev.onResumption?.("late");
+    manager.acquire("ar", "en", "listener-2", { isTeacherLeg: false });
+    expect(provider.calls.at(-1)?.resumeHandle).toBeUndefined();
   });
 
   it("resets retry attempts once a live session proves stable (>10s), keeping rapid-fail exhaustion", async () => {

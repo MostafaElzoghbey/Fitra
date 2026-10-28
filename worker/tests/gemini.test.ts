@@ -71,6 +71,7 @@ function collect() {
   const audio: ArrayBuffer[] = [];
   const status: Array<{ s: string; detail?: string }> = [];
   const transcripts: Array<{ kind: string; text: string; final: boolean }> = [];
+  const resumptions: string[] = [];
   const ev: TranslationSessionEvents = {
     onAudio: (pcm) => {
       audio.push(pcm.slice(0));
@@ -81,8 +82,11 @@ function collect() {
     onStatus: (s, detail) => {
       status.push({ s, detail });
     },
+    onResumption: (handle) => {
+      resumptions.push(handle);
+    },
   };
-  return { audio, status, transcripts, ev };
+  return { audio, status, transcripts, resumptions, ev };
 }
 
 function setupOf(socket: FakeGeminiSocket, index = 0): Record<string, unknown> {
@@ -229,6 +233,49 @@ describe("GeminiTranslationProvider (T-015)", () => {
     });
     expect(Array.from(new Uint8Array(c.audio[0] ?? new ArrayBuffer(0)))).toEqual([67, 68]);
     session.close();
+    await provider.closeAll();
+  });
+
+  it("captures the latest resumption handle and reopens with it (T-022)", async () => {
+    const sockets: FakeGeminiSocket[] = [];
+    const provider = new GeminiTranslationProvider("test-key", {
+      createSocket: (url) => {
+        const socket = new FakeGeminiSocket(url);
+        sockets.push(socket);
+        return socket;
+      },
+    });
+    const c = collect();
+    const session = await provider.openSession("ar", "en", c.ev, "h0");
+    expect(sockets[0]?.url).toContain("resume=h0");
+    sockets[0]?.serverOpen();
+    sockets[0]?.serverText({ setupComplete: {} });
+    sockets[0]?.serverText({ sessionResumptionUpdate: { resumable: true, newHandle: "h1" } });
+    sockets[0]?.serverText({ sessionResumptionUpdate: { resumable: true, newHandle: "h2" } });
+    expect(c.resumptions).toEqual(["h1", "h2"]);
+    session.close();
+    const reopened = await provider.openSession("ar", "en", collect().ev, "h2");
+    expect(sockets[1]?.url).toContain("resume=h2");
+    reopened.close();
+    await provider.closeAll();
+  });
+
+  it("ignores resumption updates after the session is closed (T-022)", async () => {
+    const sockets: FakeGeminiSocket[] = [];
+    const provider = new GeminiTranslationProvider("test-key", {
+      createSocket: (url) => {
+        const socket = new FakeGeminiSocket(url);
+        sockets.push(socket);
+        return socket;
+      },
+    });
+    const c = collect();
+    const session = await provider.openSession("ar", "en", c.ev);
+    sockets[0]?.serverOpen();
+    sockets[0]?.serverText({ setupComplete: {} });
+    session.close();
+    sockets[0]?.serverText({ sessionResumptionUpdate: { newHandle: "late" } });
+    expect(c.resumptions).toEqual([]);
     await provider.closeAll();
   });
 

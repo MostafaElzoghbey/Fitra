@@ -177,6 +177,7 @@ class GeminiTranslationSession implements TranslationSession {
   private pendingAudio: ArrayBuffer[] = [];
   private inputSegment = "";
   private outputSegment = "";
+  private latestHandle: string | null;
 
   constructor(
     readonly sourceLang: Lang,
@@ -184,7 +185,9 @@ class GeminiTranslationSession implements TranslationSession {
     private readonly apiKey: string,
     private readonly opts: GeminiProviderOptions,
     private readonly ev: TranslationSessionEvents,
-  ) {}
+  ) {
+    this.latestHandle = opts.resumeHandle ?? null;
+  }
 
   private failOnce(detail: string): void {
     if (this.failedEmitted || this.dead) return;
@@ -228,7 +231,7 @@ class GeminiTranslationSession implements TranslationSession {
     const endpoint = this.opts.endpoint ?? GEMINI_LIVE_WS_ENDPOINT;
     const url =
       `${endpoint}?key=${encodeURIComponent(this.apiKey)}` +
-      (this.opts.resumeHandle ? `&resume=${encodeURIComponent(this.opts.resumeHandle)}` : "");
+      (this.latestHandle !== null ? `&resume=${encodeURIComponent(this.latestHandle)}` : "");
     const create =
       this.opts.createSocket ??
       ((u: string): GeminiSocket => new WebSocket(u) as unknown as GeminiSocket);
@@ -265,7 +268,11 @@ class GeminiTranslationSession implements TranslationSession {
           }
         },
         onGoAway: (ms) => this.ev.onGoAway?.(ms),
-        onResumption: () => undefined,
+        onResumption: (handle) => {
+          if (this.dead) return;
+          this.latestHandle = handle;
+          this.ev.onResumption?.(handle);
+        },
       });
     };
     const onMessage = (raw: unknown): void => {
@@ -386,8 +393,15 @@ export class GeminiTranslationProvider implements TranslationProvider {
     sourceLang: Lang,
     targetLang: Lang,
     ev: TranslationSessionEvents,
+    resumeHandle?: string,
   ): Promise<TranslationSession> {
-    const session = new GeminiTranslationSession(sourceLang, targetLang, this.apiKey, this.opts, ev);
+    const session = new GeminiTranslationSession(
+      sourceLang,
+      targetLang,
+      this.apiKey,
+      { ...this.opts, resumeHandle: resumeHandle ?? this.opts.resumeHandle },
+      ev,
+    );
     this.sessions.add(session);
     await session.open();
     return session;

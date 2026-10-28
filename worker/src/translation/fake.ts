@@ -211,6 +211,7 @@ export class FakeTranslationProvider implements TranslationProvider {
     sourceLang: Lang,
     targetLang: Lang,
     ev: TranslationSessionEvents,
+    _resumeHandle?: string,
   ): Promise<TranslationSession> {
     const session = new FakeTranslationSession(
       sourceLang,
