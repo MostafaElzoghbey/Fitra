@@ -341,6 +341,7 @@ function CaptionPanel({
             <p
               className="line-clamp-2 rounded-md bg-paper-sunk p-3 text-sm leading-relaxed text-ink-600"
               data-testid="caption-live-input"
+              aria-live="polite"
             >
               <span className="me-2 text-xs font-semibold text-ink-500">
                 {strings.captionsInputLabel}
@@ -352,6 +353,7 @@ function CaptionPanel({
             <p
               className="line-clamp-2 rounded-md bg-brand-50 p-3 text-sm leading-relaxed text-ink-800"
               data-testid="caption-live-output"
+              aria-live="polite"
             >
               <span className="me-2 text-xs font-semibold text-ink-500">
                 {strings.captionsOutputLabel}

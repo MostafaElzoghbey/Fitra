@@ -78,6 +78,8 @@ export default defineConfig({
       "JOIN_TOKEN_HMAC_SECRET:fitra-e2e-test-only-secret",
       "--var",
       "TRANSLATION_PROVIDER:fake",
+      "--var",
+      "FAKE_EMIT_TRANSCRIPTS:1",
     ].join(" "),
     url: `${E2E_ORIGIN}/api/health`,
     cwd: REPO_ROOT,

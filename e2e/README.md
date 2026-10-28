@@ -72,13 +72,13 @@ Result: `?injectAudio=1` worked first try. Runtime is ~10 s for the whole flow.
   `new FakeTranslationProvider()` with defaults, `delayMs = 50`), so the spec
   uses generous timeouts instead.
 
-## Known server gap (reported, not fixed — `worker/` is read-only for T-016)
+## Metrics and captions (T-020/T-021/T-024)
 
-The DO never broadcasts `{t:"metrics"}`, so `RoomMetrics` never reaches any
-client and `metric-sessions` can never list a pair. The spec asserts the panel
-is mounted and correctly reports "no server metrics yet"
-(`metric-sessions-empty`), and proves the live translation pairs through the
-`session-status`-driven rows (`session-ar->en`, `session-ar->fr`, `session-en->ar`)
-instead. Latency is asserted from the browser-local estimate
-(`data-source="local"`). Making `metric-sessions` populate needs a DO-side
-`metrics` broadcast (T-012 backend half).
+The DO now broadcasts `{t:"metrics"}` on real traffic — throttled to one pulse
+per 2 s, with idle rooms staying silent so they can hibernate. `metric-sessions`
+therefore lists `ar->en`, `ar->fr` and `en->ar` with `data-status="live"` and
+real reconnect counts. `FAKE_EMIT_TRANSCRIPTS=1` makes the fake provider emit a
+synthetic input/output pair per accepted frame, so the caption panel renders
+live segments with `aria-live="polite"`. Latency is still asserted from the
+browser-local estimate (`data-source="local"`); the DO deliberately reports
+`e2eLatencyMs: null`.

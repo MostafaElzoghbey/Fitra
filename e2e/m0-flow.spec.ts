@@ -10,11 +10,11 @@
 // microphone and no fake-device WAV. The Chromium fake-media flags in
 // playwright.config.ts are backup only (OQ-10: the seam worked first try).
 //
-// Server gap, reported not fixed (worker/ is read-only for T-016): the DO never
-// broadcasts `{t:"metrics"}`, so `RoomMetrics` never reaches any client and
-// `metric-sessions` can never list a pair. The spec proves the panel is mounted
-// and correctly reports "no server metrics yet", and proves the live pairs
-// through the `session-status`-driven rows instead. See e2e/README.md.
+// Metrics and captions: the DO broadcasts `{t:"metrics"}` on real traffic, so
+// the panel lists live pairs with `data-status` plus real counters. The fake
+// provider is launched with FAKE_EMIT_TRANSCRIPTS=1 so the caption panel is
+// exercised end to end. Latency stays asserted from the browser-local estimate
+// (`data-source="local"`); the DO deliberately reports `e2eLatencyMs: null`.
 import { expect, test, type Page } from "@playwright/test";
 
 /** Must match E2E_ORIGIN in playwright.config.ts. */
@@ -181,14 +181,21 @@ test("M0 acceptance: teacher speaks, hand, grant, student speaks, revoke", async
     await expect.poll(async () => (await audio(teacher)).received, { timeout: 30_000 }).toBeGreaterThan(teacherBefore);
     await expect(teacher.getByTestId("session-en->ar")).toBeVisible();
 
-    // --- metrics panel: browser-measured latency + mounted session table ----
+    // --- metrics panel: browser latency + real DO session rows --------------
     await expect(teacher.getByTestId("metrics-panel")).toBeVisible();
     await expect(teacher.getByTestId("metric-latency")).toHaveAttribute("data-latency-ms", /\d+/);
     await expect(teacher.getByTestId("metric-latency")).toHaveAttribute("data-source", "local");
     await expect(teacher.getByTestId("metric-latency")).toHaveAttribute("data-samples", /[1-9]/);
-    // Server gap: the DO never broadcasts `metrics`, so the table must say so
-    // rather than fabricate rows (NFR-001: never fail silently).
-    await expect(teacher.getByTestId("metric-sessions-empty")).toBeVisible();
+    await expect(teacher.getByTestId("metric-sessions")).toBeVisible();
+    await expect(teacher.getByTestId("metric-session-ar->en")).toHaveAttribute("data-status", "live");
+    await expect(teacher.getByTestId("metric-session-ar->fr")).toHaveAttribute("data-status", "live");
+    await expect(teacher.getByTestId("metric-session-en->ar")).toHaveAttribute("data-status", "live");
+
+    // --- captions: fake transcripts reach the room live ---------------------
+    await expect(teacher.getByTestId("captions")).toBeVisible();
+    await expect(teacher.getByTestId("caption-live-input")).toContainText(/in\d+/);
+    await expect(teacher.getByTestId("caption-live-output")).toContainText(/out\d+/);
+    await expect(teacher.getByTestId("caption-live-output")).toHaveAttribute("aria-live", "polite");
 
     // --- revoke -> silence --------------------------------------------------
     await teacher.getByTestId("revoke").click();

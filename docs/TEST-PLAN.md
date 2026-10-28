@@ -60,8 +60,9 @@ target-language sockets (already covered in fanout, re-asserted here).
 - CI-safe: no secrets, no network beyond localhost/Miniflare.
 
 M0.6 E2E additions: the room shell is launched with `FAKE_EMIT_TRANSCRIPTS=1`;
-after the teacher speaks, the `en` student sees `captions` with a committed
-`output` segment, and a second interim update does not duplicate history.
+after the teacher speaks, the `en` student sees `captions` with a live `output`
+segment (the fake emits non-final segments; committing finals and capping
+history are covered by `web/tests/captions.test.ts`).
 `metric-sessions` now lists `ar->en` and `ar->fr` from the DO broadcast
 (`data-status="live"`), proving FR-040/041 instead of asserting the old
 "no server metrics" gap. The caption live region is asserted to be
