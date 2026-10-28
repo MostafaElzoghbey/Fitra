@@ -12,6 +12,7 @@ export function floorLost(
       ? previous.kind === "teacher"
       : previous.kind === "student" && previous.participantId === selfId;
   if (!heldBefore) return false;
+  if (next.kind === "none") return false;
   return role === "teacher"
     ? next.kind !== "teacher"
     : !(next.kind === "student" && next.participantId === selfId);

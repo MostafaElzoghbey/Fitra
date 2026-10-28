@@ -37,8 +37,10 @@ export const PLAYBACK_FRAME_MS_NOMINAL = 100;
 /** Buffered audio required before the first source is scheduled. */
 export const PLAYBACK_PRE_ROLL_MS = 400;
 
-/** Total buffered (pending + already-scheduled horizon) cap; past it oldest is shed. */
-export const PLAYBACK_MAX_BUFFERED_MS = 800;
+/** Max audio kept in the *unscheduled* queue. Audio already scheduled on the
+ * audio clock is never shed: providers may deliver a whole turn in one burst,
+ * and dropping the horizon cut translations mid-sentence (T-026). */
+export const PLAYBACK_MAX_PENDING_MS = 800;
 
 /** Max consecutive PLC silence frames inserted per sequence gap. */
 export const PLAYBACK_MAX_PLC_FRAMES = 10;
@@ -153,7 +155,8 @@ export class PlaybackScheduler {
    * - In-order (`seq === expected`): appended.
    * - Ahead: inserts up to MAX_PLC_FRAMES of silence, counts `gaps`.
    * - Late/reordered (`seq` behind cursor): dropped silently.
-   * - Past 800 ms total buffered: oldest pending frames shed, counts `overruns`.
+   * - Unscheduled queue past 800 ms: oldest pending frames shed, counts `overruns`.
+   *   Already-scheduled audio is never shed (a provider burst is a whole turn).
    */
   pushPacket(packet: PlaybackPacket): void {
     if (this.disposed) {
@@ -276,20 +279,18 @@ export class PlaybackScheduler {
     return pendingMs + horizonMs;
   }
 
-  /** Shed oldest pending frames while total buffered audio exceeds 800 ms. */
+  /** Shed oldest *unscheduled* frames while the queue exceeds the cap.
+   * Scheduled audio is left alone: it is already committed to the graph, and
+   * dropping it truncated provider bursts at the 800 ms horizon. */
   private trimOverrun(): void {
-    const maxSamples = (PLAYBACK_MAX_BUFFERED_MS / 1000) * PLAYBACK_SAMPLE_RATE_HZ;
-    let horizonSamples = 0;
-    if (this.nextTime !== null) {
-      horizonSamples = Math.max(0, this.nextTime - this.ctx.currentTime) * PLAYBACK_SAMPLE_RATE_HZ;
-    }
-    let total = horizonSamples + this.pendingSamples();
-    while (total > maxSamples && this.pending.length > 0) {
+    const maxSamples = (PLAYBACK_MAX_PENDING_MS / 1000) * PLAYBACK_SAMPLE_RATE_HZ;
+    let pending = this.pendingSamples();
+    while (pending > maxSamples && this.pending.length > 0) {
       const dropped = this.pending.shift();
       if (dropped === undefined) {
         break;
       }
-      total -= dropped.length;
+      pending -= dropped.length;
       this.overrunsCount += 1;
     }
   }

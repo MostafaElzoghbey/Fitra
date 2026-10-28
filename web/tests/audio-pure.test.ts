@@ -33,7 +33,7 @@ import {
 } from "../src/audio/capture.js";
 import {
   PLAYBACK_FRAME_MS_NOMINAL,
-  PLAYBACK_MAX_BUFFERED_MS,
+  PLAYBACK_MAX_PENDING_MS,
   PLAYBACK_MAX_PLC_FRAMES,
   PLAYBACK_PRE_ROLL_MS,
   PLAYBACK_SAMPLE_RATE_HZ,
@@ -267,9 +267,9 @@ describe("T-011 playback constants (docs/PROTOCOL.md section 2 + LIMITS.md secti
     expect((PLAYBACK_PRE_ROLL_MS / 1000) * PLAYBACK_SAMPLE_RATE_HZ).toBe(9600);
   });
 
-  it("keeps the buffered-audio cap above the pre-roll (headroom for jitter)", () => {
-    expect(PLAYBACK_MAX_BUFFERED_MS).toBe(800);
-    expect(PLAYBACK_MAX_BUFFERED_MS).toBeGreaterThan(PLAYBACK_PRE_ROLL_MS);
+  it("keeps the unscheduled-queue cap above the pre-roll (jitter headroom)", () => {
+    expect(PLAYBACK_MAX_PENDING_MS).toBe(800);
+    expect(PLAYBACK_MAX_PENDING_MS).toBeGreaterThan(PLAYBACK_PRE_ROLL_MS);
   });
 
   it("caps PLC at 10 frames = 1 s of silence", () => {

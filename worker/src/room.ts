@@ -993,11 +993,9 @@ export class ClassRoom {
 
   /**
    * PROTOCOL section 3.1 caption routing: both caption kinds go to the pair's
-   * target-language members. A listener belongs to exactly one pair (their
-   * language vs the current speaker's), so each receives at most one `input`
-   * and one `output` stream per turn; the speaker and same-language listeners
-   * are excluded automatically because a pair's target always differs from
-   * its source (fanout groups only cross pairs).
+   * target-language members and to the pair's source speaker, so the sender
+   * sees their own original and translated text. Same-language non-speakers
+   * stay excluded because a pair's target always differs from its source.
    */
   private broadcastCaption(
     pair: string,

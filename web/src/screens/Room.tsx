@@ -31,7 +31,13 @@ import { rejoinRoom } from "../net/api.js";
 import { attachRoomAudio, type RoomAudioHandle } from "../audio/roomShell.js";
 import { captureNoticeKey, type CaptureNotice } from "../audio/devices.js";
 import { navigate, type RoomRouteParams } from "../router.js";
-import { emptyCaptions, reduceCaption, type CaptionsState } from "../captions.js";
+import {
+  commitTurnOnFloorChange,
+  emptyCaptions,
+  reduceCaption,
+  type CaptionTurn,
+  type CaptionsState,
+} from "../captions.js";
 
 export interface RoomProps {
   readonly session: RoomRouteParams;
@@ -77,8 +83,14 @@ function reduceServerMsg(state: RoomState, msg: ServerMsg): RoomState {
         roster: msg.roster,
         connected: true,
       };
-    case "floor-changed":
-      return { ...state, floor: msg.floor };
+    case "floor-changed": {
+      // A new holder is a speaker/turn boundary: commit the live caption turn
+      // defensively (final:true may never arrive), so the previous speaker's
+      // text stays on screen when the next person talks. Going idle is not a
+      // boundary: the translated tail may still be streaming after mic-off.
+      const captions = commitTurnOnFloorChange(state.captions, msg.floor);
+      return { ...state, captions, floor: msg.floor };
+    }
     case "hands":
       return { ...state, raised: [...msg.raised] };
     case "session-status":
@@ -319,6 +331,38 @@ export function Room({
   );
 }
 
+/** One committed turn of the chat transcript: source line + translation line. */
+function TurnBubble({
+  strings,
+  turn,
+  index,
+}: {
+  readonly strings: UiStrings;
+  readonly turn: CaptionTurn;
+  readonly index: number;
+}): React.JSX.Element {
+  return (
+    <div className="space-y-1 rounded-lg bg-paper-sunk p-3" data-testid={`caption-history-${index}`}>
+      {turn.input !== "" && (
+        <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-ink-600">
+          <span className="me-2 text-xs font-semibold text-ink-400">
+            {strings.captionsInputLabel}
+          </span>
+          {turn.input}
+        </p>
+      )}
+      {turn.output !== "" && (
+        <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-ink-800">
+          <span className="me-2 text-xs font-semibold text-ink-400">
+            {strings.captionsOutputLabel}
+          </span>
+          {turn.output}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function CaptionPanel({
   strings,
   captions,
@@ -327,7 +371,25 @@ function CaptionPanel({
   readonly captions: CaptionsState;
 }): React.JSX.Element {
   const { live, history } = captions;
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  // Chat transcript follows new content only while the reader is already near
+  // the bottom; scrolling up to read long text must not be yanked back down.
+  const nearBottomRef = useRef(true);
+
+  const handleScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (el === null) return;
+    nearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 64;
+  }, []);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el === null || !nearBottomRef.current) return;
+    el.scrollTop = el.scrollHeight;
+  }, [captions]);
+
   const empty = live.input === "" && live.output === "" && history.length === 0;
+  const liveOpen = live.input !== "" || live.output !== "";
   return (
     <section className="ui-card p-4" aria-label={strings.captionsTitle}>
       <h2 className="ui-section-title">{strings.captionsTitle}</h2>
@@ -336,56 +398,45 @@ function CaptionPanel({
           {strings.captionsEmpty}
         </p>
       ) : (
-        <div className="mt-3 space-y-2" data-testid="captions">
-          {live.input !== "" && (
-            <p
-              className="line-clamp-2 rounded-md bg-paper-sunk p-3 text-sm leading-relaxed text-ink-600"
-              data-testid="caption-live-input"
-              aria-live="polite"
-            >
-              <span className="me-2 text-xs font-semibold text-ink-500">
-                {strings.captionsInputLabel}
-              </span>
-              {live.input}
-            </p>
-          )}
-          {live.output !== "" && (
-            <p
-              className="line-clamp-2 rounded-md bg-brand-50 p-3 text-sm leading-relaxed text-ink-800"
-              data-testid="caption-live-output"
-              aria-live="polite"
-            >
-              <span className="me-2 text-xs font-semibold text-ink-500">
-                {strings.captionsOutputLabel}
-              </span>
-              {live.output}
-            </p>
-          )}
+        <div
+          ref={scrollRef}
+          onScroll={handleScroll}
+          className="mt-3 max-h-[60vh] space-y-3 overflow-y-auto pe-1"
+          data-testid="captions"
+        >
           {history.length > 0 && (
-            <div
-              className="max-h-48 space-y-2 overflow-y-auto"
-              data-testid="caption-history"
-              aria-live="polite"
-            >
-              {history.map((segment, index) => (
-                <p
-                  key={index}
-                  className={
-                    segment.kind === "output"
-                      ? "text-sm leading-relaxed text-ink-800"
-                      : "text-sm leading-relaxed text-ink-500"
-                  }
-                  data-testid={`caption-history-${index}`}
-                  data-kind={segment.kind}
-                >
-                  <span className="me-2 text-xs font-semibold text-ink-400">
-                    {segment.kind === "output"
-                      ? strings.captionsOutputLabel
-                      : strings.captionsInputLabel}
-                  </span>
-                  {segment.text}
-                </p>
+            <div className="space-y-3" data-testid="caption-history">
+              {history.map((turn, index) => (
+                <TurnBubble key={index} strings={strings} turn={turn} index={index} />
               ))}
+            </div>
+          )}
+          {liveOpen && (
+            <div className="space-y-1 rounded-lg bg-brand-50 p-3">
+              {live.input !== "" && (
+                <p
+                  className="whitespace-pre-wrap break-words text-sm leading-relaxed text-ink-600"
+                  data-testid="caption-live-input"
+                  aria-live="polite"
+                >
+                  <span className="me-2 text-xs font-semibold text-ink-500">
+                    {strings.captionsInputLabel}
+                  </span>
+                  {live.input}
+                </p>
+              )}
+              {live.output !== "" && (
+                <p
+                  className="whitespace-pre-wrap break-words text-sm leading-relaxed text-ink-800"
+                  data-testid="caption-live-output"
+                  aria-live="polite"
+                >
+                  <span className="me-2 text-xs font-semibold text-ink-500">
+                    {strings.captionsOutputLabel}
+                  </span>
+                  {live.output}
+                </p>
+              )}
             </div>
           )}
         </div>

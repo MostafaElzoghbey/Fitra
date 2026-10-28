@@ -118,8 +118,18 @@ reports itself instead of dropping input silently (NFR-001).
   (memory only, AGENTS.md rule 2).
 - `speaking-stop` flushes the provider input (`realtimeInput.audioStreamEnd`)
   so speech captured before the button was released is translated. Floor
-  release never cancels in-flight translated audio; only the tab that held
-  the floor drops its own playback.
+  release never cancels in-flight translated audio; only a tab that loses the
+  floor to a new holder drops its own playback, and floor→`none` never
+  interrupts playback.
+- A `floor-changed` frame naming a new holder is a caption turn boundary: the
+  client commits its current live turn even if `final:true` never arrived
+  (defensive commit for engines that do not emit turn-complete), so the
+  previous speaker's text stays on screen when the next person talks. Going
+  idle (`floor.kind === "none"`) is not a boundary: the provider may still
+  stream the translated tail after `speaking-stop`, and committing there would
+  split one utterance into two turns. The UI keeps a chronological chat-style
+  transcript: committed turns persist and new turns append below them, instead
+  of a live slot overwriting the previous text.
 
 ## 3.2 Roster synchronisation
 
@@ -160,10 +170,15 @@ activity:
 
 The wire semantics in section 3.1 are normative; the client MUST:
 
-- replace the live segment on `final:false` and commit it on `final:true`
-  (keeping at most 50 committed segments in memory);
-- render at most two visual lines for the live segment, with committed history
-  scrollable — long translations must not push the controls off-screen;
+- replace the live text on `final:false` in place and commit the turn on
+  `final:true` (keeping at most 50 committed turns in memory); a
+  `floor-changed` frame naming a new holder commits the live turn defensively
+  when `final:true` is absent, while floor→`none` does not;
+- render a single chronological chat-style transcript in a scrollable area of
+  capped height — committed turns persist, new turns append below, and long
+  text wraps instead of being clamped, so it never pushes the controls
+  off-screen; auto-scroll follows new content only while the reader is near
+  the bottom;
 - label the source (`input`) and translated (`output`) streams distinctly;
 - use `aria-live="polite"` on the committed region and inherit the page `dir`,
   so Arabic and other RTL languages render correctly;

@@ -132,14 +132,26 @@ end to end as early as possible.
   target-language sockets and to the pair's source speaker, so the sender sees
   their own original and translated text (PROTOCOL.md section 3.1). Memory
   only — no caption data is ever persisted.
-- **FR-035** Caption display MUST treat `final:false` as a live replacement of
-  the current segment for that `kind` and `final:true` as the commit of that
-  segment (never overwrite a committed segment with the next interim one).
-  The UI shows a two-line live region per kind, keeps at most 50 committed
-  segments in memory, labels input vs translated text, uses `aria-live` for
-  the committed line, and inherits the page `dir` so Arabic renders RTL.
-  Captions are optional: an engine that yields none shows the documented
-  empty state, never a spinner that implies one is coming.
+- **FR-035** Caption display MUST treat `final:false` as an in-place
+  replacement of the current live text for that `kind` and `final:true` as
+  marking that kind final; a caption *turn* groups one input line with its
+  output line and commits to history once every non-empty live kind is final
+  (never overwrite a committed turn with the next interim one). The UI renders
+  a single chronological chat-style transcript — oldest committed turn first,
+  the current live turn last — where old turns stay on screen and new turns
+  append below (chat/WhatsApp-style), including across speaker changes: a
+  `floor-changed` frame naming a new holder is a turn boundary that commits
+  the live turn defensively when `final:true` never arrived; going idle
+  (`floor.kind === "none"`) is not a boundary, because the provider may still
+  stream the translated tail after mic-off. Long text wraps
+  (`whitespace-pre-wrap break-words`, no line clamping) and the transcript
+  area itself scrolls at a capped height; auto-scroll follows new content only
+  while the reader is already near the bottom. At most 50 committed turns are
+  kept in memory, oldest evicted first. Each turn is one bubble labelling
+  input vs translated text, uses `aria-live` for the live lines, and inherits
+  the page `dir` so Arabic renders RTL. Captions are optional: an engine that
+  yields none shows the documented empty state, never a spinner that implies
+  one is coming.
 
 ### 4.5 Debug / metrics panel (M0)
 

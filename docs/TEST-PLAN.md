@@ -11,7 +11,7 @@ failure injection). Real Gemini only in the opt-in manual smoke test.
 | SessionManager | lazy open, refcount share (2 listeners 1 session), idle-close, cap overflow protects teacher leg, reconnect backoff sequence | FR-020–025 |
 | Protocol codec | header encode/decode, seq wrap, oversize reject, bad version reject, JSON type guards | `docs/PROTOCOL.md` |
 | Join token | sign/verify, expiry, tamper reject, role binding, rejoin verify (`ignoreExpiry`) re-signing the SAME pid | FR-003/050 |
-| Caption reducer (`web/tests/captions.test.ts`) | interim replaces, final commits exactly once, next interim does not overwrite history, 50-segment cap evicts oldest, input/output streams independent, empty final is ignored, RTL text passes through unchanged | FR-034/035 |
+| Caption reducer (`web/tests/captions.test.ts`) | interim replaces in place, a turn (input+output) commits when every non-empty live kind is final, `commitLiveCaptions` safety commit (new-holder floor change / missing turnComplete; floor→none keeps the turn live), next interim never overwrites committed turns, 50-turn cap evicts oldest, input/output lines independent, stray final ignored, RTL text passes through unchanged | FR-034/035 |
 | Metrics aggregation (`worker/tests/metrics.test.ts`) | sliding 1 s rate window, 60 s error window, session snapshot ordering, throttled emit (≤1/2 s), immediate emit on status change, idle room emits nothing | FR-040–043 |
 
 ## 2. Durable Object (Vitest + Cloudflare Workers pool)
@@ -60,13 +60,15 @@ target-language sockets (already covered in fanout, re-asserted here).
 - CI-safe: no secrets, no network beyond localhost/Miniflare.
 
 M0.6 E2E additions: the room shell is launched with `FAKE_EMIT_TRANSCRIPTS=1`;
-after the teacher speaks, the `en` student sees `captions` with a live `output`
-segment (the fake emits non-final segments; committing finals and capping
-history are covered by `web/tests/captions.test.ts`), and the teacher sees
+after the teacher speaks, the `en` student sees `captions` — a chronological
+chat-style transcript — with a live `output` line (the fake emits non-final
+segments; committing turns, the new-holder safety commit and the 50-turn cap
+are covered by `web/tests/captions.test.ts`), and the teacher sees
 their own `input` and `output` captions while still holding the floor. On
 `speaking-stop` the provider receives `audioStreamEnd` and the translated tail
-keeps playing for listeners; only the tab that held the floor interrupts its
-own playback (`web/tests/floor-gate.test.ts`).
+keeps playing for listeners; only a tab that loses the floor to a new holder
+interrupts its own playback, never on floor→`none`
+(`web/tests/floor-gate.test.ts`).
 `metric-sessions` now lists `ar->en` and `ar->fr` from the DO broadcast
 (`data-status="live"`), proving FR-040/041 instead of asserting the old
 "no server metrics" gap. The caption live region is asserted to be
@@ -97,7 +99,7 @@ multilingual, so text assertions are inherently fragile.
 | Room | `roster`, `roster-row-<participantId>`, `grant-<participantId>`, `deny-<participantId>` | `participantId` comes from `welcome` |
 | Room | `mic-toggle`, `test-deployment-badge`, `headphones-hint`, `room-error` | |
 | Room | `room-disconnected`, `room-code-banner` | `room-disconnected` shows while the socket is down and the client rejoin retries are exhausted or blocked |
-| Room | `captions`, `captions-empty` | M0.5 caption frames: `output` translated text + `input` source transcription; `captions-empty` until the first caption |
+| Room | `captions`, `captions-empty`, `caption-live-input`, `caption-live-output`, `caption-history`, `caption-history-<index>` | chat-style transcript: committed turns (`caption-history-<index>`) persist oldest-first, the live turn appends below and updates in place; the transcript area scrolls; `captions-empty` until the first caption |
 | Room | `metrics-mount` | T-012 renders the panel inside this node |
 | Room | `metrics-panel` | T-012 panel root; `metrics-pending` chip until the first `metrics` frame |
 | Room | `metric-latency` | `data-latency-ms` absent until measured, `data-samples`, `data-source` = `local` (browser estimate) / `server` |

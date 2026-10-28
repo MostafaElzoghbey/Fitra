@@ -42,9 +42,9 @@ Related server data (not states): `raisedHands: pid[]` (FIFO queue),
   speaker as source are released; listeners hear silence (no filler audio).
 - **Speaker stops mid-sentence (still connected)**: `speaking-stop` flushes
   the provider input, and the translated tail keeps flowing to listeners after
-  the floor becomes IDLE. A client interrupts its own playback only when the
-  tab itself loses a floor it held — never merely because the floor became
-  IDLE or moved to another participant.
+  the floor becomes IDLE. A client interrupts its own playback only when a
+  different holder takes the floor from it — never merely because the floor
+  became IDLE, since the translated tail may still be playing.
 - **Teacher disconnects**: translation stops (no source), room state retained
   in DO memory/SQLite; on teacher rejoin (same room code + `teacher` role +
   valid token) state resumes at IDLE. A teacher REPLACING their own socket

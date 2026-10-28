@@ -229,7 +229,10 @@ Latency levers we do control: (1) pre-warm the pair set at floor grant
 (already wired); (2) feed each pair exactly once per frame (already wired);
 (3) keep the DO byte-forwarding path free of parsing; (4) avoid extra
 client-side pre-roll — the current 400 ms playback pre-roll is a deliberate
-jitter trade-off, revisited only with measurements (OQ-06).
+jitter trade-off, revisited only with measurements (OQ-06); (5) never shed
+audio already scheduled on the audio clock — the 800 ms cap applies only to
+the unscheduled queue, because a provider may deliver a whole translated turn
+in one burst and cutting the horizon truncated the tail (T-026).
 - **Fake provider**: echoes input audio upsample 16→24 kHz (per the provider
   output contract) and optionally tagged per language (prepends a 2-byte
   marker), configurable `delayMs`, failure injection

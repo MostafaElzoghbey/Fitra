@@ -166,6 +166,8 @@ test("M0 acceptance: teacher speaks, hand, grant, student speaks, revoke", async
     // The speaker sees their own original and translated text (FR-034).
     await expect(teacher.getByTestId("caption-live-input")).toContainText(/in\d+/);
     await expect(teacher.getByTestId("caption-live-output")).toContainText(/out\d+/);
+    const teacherOwnTurn = (await teacher.getByTestId("caption-live-output").textContent()) ?? "";
+    expect(teacherOwnTurn, "teacher must see their own translated text").toContain("out");
 
     // --- raise hand -> grant -> student speaks -> teacher receives ----------
     await teacher.getByTestId("mic-toggle").click();
@@ -183,6 +185,13 @@ test("M0 acceptance: teacher speaks, hand, grant, student speaks, revoke", async
     await studentEn.getByTestId("mic-toggle").click();
     await expect.poll(async () => (await audio(teacher)).received, { timeout: 30_000 }).toBeGreaterThan(teacherBefore);
     await expect(teacher.getByTestId("session-en->ar")).toBeVisible();
+    // The teacher's own earlier turn stays committed at the top of the
+    // transcript; the student's turn is appended below it instead of
+    // replacing it (T-027). Committed turns are oldest-first, so index 0 is
+    // the teacher's turn (interims may have advanced past the captured one).
+    const teacherTurn = teacher.getByTestId("caption-history-0");
+    await expect(teacherTurn).toContainText(/in\d+/);
+    await expect(teacherTurn).toContainText(/out\d+/);
 
     // --- metrics panel: browser latency + real DO session rows --------------
     await expect(teacher.getByTestId("metrics-panel")).toBeVisible();
