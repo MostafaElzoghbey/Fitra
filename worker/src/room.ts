@@ -55,6 +55,7 @@ import {
   type SessionStatus,
 } from "./translation/sessions.js";
 import { upsample16kTo24kMono } from "./resample.js";
+import { MetricsCollector } from "./metrics.js";
 import type {
   TranslationProvider,
   TranslationSession,
@@ -251,6 +252,12 @@ export class ClassRoom {
   private readonly pairSpeaker = new Map<string, number>();
   /** Per-listener outgoing sequence counters for type-0x02 frames. */
   private readonly outSeq = new Map<string, number>();
+  /** T-020 counters: pure, timer-free; pulses ride real events only. */
+  private readonly collector = new MetricsCollector();
+  /** Re-entrancy guard: the metrics send's own recordOutbound must not pulse. */
+  private pulsing = false;
+  /** room_config.created_at_ms, cached after the first successful read. */
+  private roomCreatedAtMs: number | null = null;
 
   constructor(state: DurableObjectState, env: RoomEnv) {
     this.state = state;
@@ -349,11 +356,18 @@ export class ClassRoom {
   ): Promise<void> {
     const member = this.memberOf(ws);
     if (member === null) return;
+    // T-020 single inbound boundary: every received frame (binary + control)
+    // counts before validation/rate limiting, because it counts frames
+    // received, not frames accepted.
+    this.collector.recordInbound(Date.now());
     if (typeof message === "string") {
       this.routeControl(ws, member, message);
-      return;
+    } else {
+      this.routeBinary(ws, member, message);
     }
-    this.routeBinary(ws, member, message);
+    // Event-driven cadence (FR-042/043): the broadcast piggybacks on this
+    // real event; the 2 s throttle inside the collector suppresses excess.
+    this.pulseMetrics(false);
   }
 
   async webSocketClose(
@@ -971,6 +985,9 @@ export class ClassRoom {
       attempt,
     } satisfies ServerMsg);
     for (const { ws } of this.liveSockets()) this.trySend(ws, msg);
+    // A status transition is the one thing the panel must see immediately
+    // (PROTOCOL section 3.3): forced bypasses the 2 s throttle.
+    this.pulseMetrics(true);
   }
 
   /**
@@ -1004,12 +1021,46 @@ export class ClassRoom {
     }
   }
 
-  /** Best-effort send: a socket that raced us to close must not kill fan-out. */
+  /** Best-effort send: a socket that raced us to close must not kill fan-out.
+   * T-020: the single outbound accounting boundary — every DO→browser frame
+   * (audio pieces, control, metrics, errors) passes through here exactly once. */
   private trySend(ws: WebSocket, data: string | ArrayBuffer | Uint8Array): void {
     try {
       ws.send(data);
+      this.collector.recordOutbound(Date.now());
     } catch {
       return;
+    }
+  }
+
+  /**
+   * T-020/FR-042: emit one `metrics` frame when a real event piggybacks it.
+   * Never scheduled: an idle room has no events, so it emits nothing and
+   * stays hibernatable (FR-043). Forced pulses (session-status) bypass the
+   * 2 s throttle; `pulsing` prevents the metrics send's own recordOutbound
+   * from recursively entering this method.
+   */
+  private pulseMetrics(forced: boolean): void {
+    if (this.pulsing) return;
+    const sockets = this.liveSockets();
+    if (sockets.length === 0) return;
+    const now = Date.now();
+    if (!this.collector.shouldEmit(now, forced)) return;
+    if (this.roomCreatedAtMs === null) {
+      const room = this.loadRoom() ?? this.ensureRoom(this.roomCode());
+      this.roomCreatedAtMs = room.created_at_ms;
+    }
+    const m = this.collector.snapshot(
+      now,
+      this.roomCreatedAtMs,
+      this.sessions?.snapshotSessions() ?? [],
+    );
+    const msg = JSON.stringify({ t: "metrics", m } satisfies ServerMsg);
+    this.pulsing = true;
+    try {
+      for (const { ws } of sockets) this.trySend(ws, msg);
+    } finally {
+      this.pulsing = false;
     }
   }
 
@@ -1332,6 +1383,7 @@ export class ClassRoom {
   }
 
   private sendError(ws: WebSocket, code: RejectCode, message: string): void {
+    this.collector.recordError(Date.now());
     this.trySend(
       ws,
       JSON.stringify({ t: "error", code, message } satisfies ServerMsg),

@@ -152,6 +152,10 @@ interface SessionEntry {
   teacherLeg: boolean;
   readonly createdSeq: number;
   attempts: number;
+  /** Current status for the metrics snapshot (T-020); updated in emit(). */
+  status: SessionStatus;
+  /** Retry count since the pair opened (metrics `reconnects`, FR-042). */
+  reconnects: number;
   terminallyFailed: boolean;
   opening: boolean;
   /** Wall-clock time of the latest "live" status; null while not live. */
@@ -209,6 +213,23 @@ export class SessionManager {
     return this.entries.size;
   }
 
+  /**
+   * T-020 metrics snapshot (PROTOCOL section 3.3): every entry still in the
+   * map (entries exist only while listeners exist, so phantom pairs cannot
+   * appear) with its current status and reconnect count.
+   */
+  snapshotSessions(): { pair: string; status: string; reconnects: number }[] {
+    const out: { pair: string; status: string; reconnects: number }[] = [];
+    for (const entry of this.entries.values()) {
+      out.push({
+        pair: entry.key,
+        status: entry.status,
+        reconnects: entry.reconnects,
+      });
+    }
+    return out;
+  }
+
   acquire(
     sourceLang: Lang,
     targetLang: Lang,
@@ -225,6 +246,9 @@ export class SessionManager {
       if (existing.terminallyFailed) {
         existing.terminallyFailed = false;
         existing.attempts = 0;
+        // A fresh open on a previously dead pair restarts the reconnect
+        // story for the metrics panel too.
+        existing.reconnects = 0;
         this.openUnderlying(existing);
       } else if (
         existing.underlying === null &&
@@ -252,6 +276,8 @@ export class SessionManager {
       teacherLeg: isTeacherLeg,
       createdSeq: this.createdCounter,
       attempts: 0,
+      status: "connecting",
+      reconnects: 0,
       terminallyFailed: false,
       opening: false,
       liveSinceMs: null,
@@ -374,6 +400,7 @@ export class SessionManager {
       return;
     }
     entry.attempts += 1;
+    entry.reconnects += 1;
     entry.underlying = null;
     entry.handle.attach(null);
     this.emit(entry.key, "reconnecting", entry.attempts);
@@ -422,6 +449,10 @@ export class SessionManager {
   }
 
   private emit(pair: string, status: SessionStatus, attempt: number): void {
+    // Track the current status for snapshotSessions() (T-020). The cap-path
+    // "degraded" emit has no entry (stateless muted handle) — nothing to track.
+    const entry = this.entries.get(pair);
+    if (entry !== undefined) entry.status = status;
     this.onSessionStatus?.(pair, status, attempt);
   }
 }

@@ -129,11 +129,11 @@ class Inbox {
     return this.closeInfo;
   }
 
-  /** Fails when any further frame arrives inside `timeoutMs`. */
+  /** Fails when any further non-metrics frame arrives inside `timeoutMs`. */
   async quiet(timeoutMs = 150): Promise<void> {
-    const before = this.received.length;
+    const before = this.received.filter((m) => m.t !== "metrics").length;
     await new Promise((resolve) => setTimeout(resolve, timeoutMs));
-    expect(this.received.length).toBe(before);
+    expect(this.received.filter((m) => m.t !== "metrics").length).toBe(before);
   }
 }
 

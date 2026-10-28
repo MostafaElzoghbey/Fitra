@@ -151,11 +151,11 @@ class Inbox {
     return this.binary.length - this.binCursor;
   }
 
-  /** Fails when any further text frame arrives inside `timeoutMs`. */
+  /** Fails when any further non-metrics text frame arrives inside `timeoutMs`. */
   async quietText(timeoutMs = 200): Promise<void> {
-    const before = this.text.length;
+    const before = this.text.filter((m) => m.t !== "metrics").length;
     await new Promise((resolve) => setTimeout(resolve, timeoutMs));
-    expect(this.text.length).toBe(before);
+    expect(this.text.filter((m) => m.t !== "metrics").length).toBe(before);
   }
 
   /** Fails when any further binary frame arrives inside `timeoutMs`. */

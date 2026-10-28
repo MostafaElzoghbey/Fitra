@@ -39,6 +39,7 @@ export default defineConfig({
             "tests/room.test.ts",
             "tests/floor-do.test.ts",
             "tests/fanout.test.ts",
+            "tests/metrics-do.test.ts",
             "node_modules/**",
           ],
         },
@@ -67,7 +68,12 @@ export default defineConfig({
         resolve: { alias: SHARED_ALIAS },
         test: {
           name: "do",
-          include: ["tests/room.test.ts", "tests/floor-do.test.ts", "tests/fanout.test.ts"],
+          include: [
+            "tests/room.test.ts",
+            "tests/floor-do.test.ts",
+            "tests/fanout.test.ts",
+            "tests/metrics-do.test.ts",
+          ],
         },
       },
     ],
