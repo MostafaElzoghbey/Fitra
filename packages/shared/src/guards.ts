@@ -1,20 +1,15 @@
 // T-002: JSON control-message guards per docs/PROTOCOL.md section 3.
+// Revised 2026-10-28 (T-028): mic model replaces the single-floor model.
 
 export type Role = "teacher" | "student";
 
-export type FloorHolder =
-  | { kind: "none" }
-  | { kind: "teacher" }
-  | { kind: "student"; participantId: string };
-
 export type ClientMsg =
-  | { t: "speaking-start" }
-  | { t: "speaking-stop" }
-  | { t: "raise-hand" }
-  | { t: "lower-hand" }
-  | { t: "grant"; participantId: string }
-  | { t: "deny"; participantId: string }
-  | { t: "revoke" }
+  | { t: "mic-open" }
+  | { t: "mic-close" }
+  | { t: "mute-all" }
+  | { t: "unmute-all" }
+  | { t: "mute"; participantId: string }
+  | { t: "unmute"; participantId: string }
   | { t: "ping"; id: number };
 
 export type ServerMsg =
@@ -22,27 +17,36 @@ export type ServerMsg =
       t: "welcome";
       participantId: string;
       participantIndex: number;
-      floor: FloorHolder;
       roster: RosterEntry[];
     }
-  | { t: "floor-changed"; floor: FloorHolder; reason: string }
-  | { t: "hands"; raised: string[] }
+  | { t: "mic-changed"; participantId: string; micOpen: boolean }
   | {
       t: "session-status";
       pair: string;
       status: "connecting" | "live" | "reconnecting" | "failed" | "degraded";
       attempt?: number;
     }
-  | { t: "caption"; kind: "input" | "output"; text: string; final: boolean }
+  | {
+      t: "caption";
+      kind: "input" | "output";
+      text: string;
+      final: boolean;
+      speaker: number;
+    }
   | { t: "metrics"; m: RoomMetrics }
   | { t: "error"; code: string; message: string }
   | { t: "pong"; id: number };
 
 export interface RosterEntry {
   participantId: string;
+  /** Stable per-join index (0 = teacher); lets clients attribute `caption` /
+   * audio `speaker` indexes to roster names (PROTOCOL §2/§3.2). */
+  participantIndex: number;
   name: string;
   role: Role;
   lang: string;
+  micOpen: boolean;
+  forcedMuted: boolean;
 }
 
 export interface RoomMetricsSession {
@@ -74,10 +78,6 @@ function isNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every(isString);
-}
-
 /** Exact-key check: required keys present, no unexpected keys beyond allowed. */
 function hasOnlyKeys(
   value: Record<string, unknown>,
@@ -96,23 +96,6 @@ function hasOnlyKeys(
 
 // --- structural guards ----------------------------------------------------
 
-export function isFloorHolder(value: unknown): value is FloorHolder {
-  if (!isRecord(value)) return false;
-  const kind = value["kind"];
-  switch (kind) {
-    case "none":
-      return hasOnlyKeys(value, ["kind"]);
-    case "teacher":
-      return hasOnlyKeys(value, ["kind"]);
-    case "student":
-      return (
-        hasOnlyKeys(value, ["kind", "participantId"]) && isString(value["participantId"])
-      );
-    default:
-      return false;
-  }
-}
-
 function isRole(value: unknown): value is Role {
   switch (value) {
     case "teacher":
@@ -126,11 +109,22 @@ function isRole(value: unknown): value is Role {
 export function isRosterEntry(value: unknown): value is RosterEntry {
   if (!isRecord(value)) return false;
   return (
-    hasOnlyKeys(value, ["participantId", "name", "role", "lang"]) &&
+    hasOnlyKeys(value, [
+      "participantId",
+      "participantIndex",
+      "name",
+      "role",
+      "lang",
+      "micOpen",
+      "forcedMuted",
+    ]) &&
     isString(value["participantId"]) &&
+    isNumber(value["participantIndex"]) &&
     isString(value["name"]) &&
     isRole(value["role"]) &&
-    isString(value["lang"])
+    isString(value["lang"]) &&
+    typeof value["micOpen"] === "boolean" &&
+    typeof value["forcedMuted"] === "boolean"
   );
 }
 
@@ -176,20 +170,18 @@ export function isClientMsg(value: unknown): value is ClientMsg {
   if (!isRecord(value)) return false;
   const tag = value["t"];
   switch (tag) {
-    case "speaking-start":
+    case "mic-open":
       return hasOnlyKeys(value, ["t"]);
-    case "speaking-stop":
+    case "mic-close":
       return hasOnlyKeys(value, ["t"]);
-    case "raise-hand":
+    case "mute-all":
       return hasOnlyKeys(value, ["t"]);
-    case "lower-hand":
+    case "unmute-all":
       return hasOnlyKeys(value, ["t"]);
-    case "grant":
+    case "mute":
       return hasOnlyKeys(value, ["t", "participantId"]) && isString(value["participantId"]);
-    case "deny":
+    case "unmute":
       return hasOnlyKeys(value, ["t", "participantId"]) && isString(value["participantId"]);
-    case "revoke":
-      return hasOnlyKeys(value, ["t"]);
     case "ping":
       return hasOnlyKeys(value, ["t", "id"]) && isNumber(value["id"]);
     default:
@@ -218,21 +210,18 @@ export function isServerMsg(value: unknown): value is ServerMsg {
   switch (tag) {
     case "welcome":
       return (
-        hasOnlyKeys(value, ["t", "participantId", "participantIndex", "floor", "roster"]) &&
+        hasOnlyKeys(value, ["t", "participantId", "participantIndex", "roster"]) &&
         isString(value["participantId"]) &&
         isNumber(value["participantIndex"]) &&
-        isFloorHolder(value["floor"]) &&
         Array.isArray(value["roster"]) &&
         (value["roster"] as unknown[]).every(isRosterEntry)
       );
-    case "floor-changed":
+    case "mic-changed":
       return (
-        hasOnlyKeys(value, ["t", "floor", "reason"]) &&
-        isFloorHolder(value["floor"]) &&
-        isString(value["reason"])
+        hasOnlyKeys(value, ["t", "participantId", "micOpen"]) &&
+        isString(value["participantId"]) &&
+        typeof value["micOpen"] === "boolean"
       );
-    case "hands":
-      return hasOnlyKeys(value, ["t", "raised"]) && isStringArray(value["raised"]);
     case "session-status":
       return (
         hasOnlyKeys(value, ["t", "pair", "status"], ["attempt"]) &&
@@ -242,10 +231,11 @@ export function isServerMsg(value: unknown): value is ServerMsg {
       );
     case "caption":
       return (
-        hasOnlyKeys(value, ["t", "kind", "text", "final"]) &&
+        hasOnlyKeys(value, ["t", "kind", "text", "final", "speaker"]) &&
         (value["kind"] === "input" || value["kind"] === "output") &&
         isString(value["text"]) &&
-        typeof value["final"] === "boolean"
+        typeof value["final"] === "boolean" &&
+        isNumber(value["speaker"])
       );
     case "metrics":
       return hasOnlyKeys(value, ["t", "m"]) && isRoomMetrics(value["m"]);
