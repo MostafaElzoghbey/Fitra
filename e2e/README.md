@@ -16,10 +16,11 @@ at load time instead.
 
 `playwright.config.ts` starts `wrangler dev` on `http://127.0.0.1:8787`, which
 serves the Worker, the ClassRoom DO and the built SPA from one origin. Flow:
-create room -> join ×3 (consent-accept each) -> teacher speaks -> students
-receive, speaker receives nothing (FR-015) -> raise-hand -> grant -> student
-speaks -> teacher receives -> revoke -> silence, plus roster, RTL, floor-banner
-and metrics-panel asserts.
+create room -> join ×3 (consent-accept each) -> teacher opens mic -> students
+receive, speaker receives nothing (FR-015) -> student opens mic simultaneously
+(independent per-speaker pipes) -> teacher force-mutes the student (rejected
+reopen answers mic-forced-muted) -> unmute -> student reopens their own mic ->
+mute-all / unmute-all -> roster, RTL, mic-banner and metrics-panel asserts.
 
 ## Wrangler pin — read this before changing the harness
 

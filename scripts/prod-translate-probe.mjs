@@ -131,9 +131,9 @@ await waitFor(teacher.inbox, (m) => m.t === "welcome");
 await waitFor(student.inbox, (m) => m.t === "welcome");
 console.log("both sockets welcomed");
 
-teacher.ws.send(JSON.stringify({ t: "speaking-start" }));
-await waitFor(teacher.inbox, (m) => m.t === "floor-changed" && m.floor.kind === "teacher");
-console.log("teacher holds the floor");
+teacher.ws.send(JSON.stringify({ t: "mic-open" }));
+await waitFor(teacher.inbox, (m) => m.t === "mic-changed" && m.micOpen === true);
+console.log("teacher mic open");
 
 const FRAMES = 40;
 for (let i = 0; i < FRAMES; i++) {

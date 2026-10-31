@@ -3,8 +3,9 @@
  * T-017 production smoke (Fake provider, no secrets, no Gemini spend).
  *
  * Usage: node scripts/prod-smoke.mjs [baseUrl]
- * Exercises the live host end to end over real WebSockets:
- * create -> join teacher+student -> floor -> audio fan-out both directions.
+ * Exercises the live host end to end over real WebSockets (docs/MIC-CONTROL.md):
+ * create -> join teacher+student -> mics -> audio fan-out both directions ->
+ * force-mute -> unmute.
  */
 const BASE = process.argv[2] ?? "https://fitra-lab.wasalny.workers.dev";
 const WS_BASE = BASE.replace(/^http/, "ws");
@@ -46,11 +47,11 @@ function connect(token, name) {
   });
 }
 
-function waitFor(inbox, pred, timeoutMs = 8000) {
+function waitFor(inbox, pred, timeoutMs = 8000, since = 0) {
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + timeoutMs;
     const tick = () => {
-      const hit = inbox.control.find(pred);
+      const hit = inbox.control.find((m, i) => i >= since && pred(m));
       if (hit) return resolve(hit);
       if (Date.now() >= deadline) return reject(new Error("timeout waiting for control message"));
       setTimeout(tick, 25);
@@ -75,9 +76,15 @@ await waitFor(teacher.inbox, (m) => m.t === "welcome");
 await waitFor(student.inbox, (m) => m.t === "welcome");
 console.log("both sockets welcomed");
 
-// Teacher speaks: takes floor, streams 5 frames.
-teacher.ws.send(JSON.stringify({ t: "speaking-start" }));
-await waitFor(teacher.inbox, (m) => m.t === "floor-changed" && m.floor.kind === "teacher");
+const studentId = teacher.inbox.control
+  .filter((m) => m.t === "welcome")
+  .flatMap((m) => m.roster)
+  .find((r) => r.role === "student")?.participantId;
+if (!studentId) throw new Error("FAIL: no student in roster");
+
+// Teacher speaks: opens their mic, streams 5 frames.
+teacher.ws.send(JSON.stringify({ t: "mic-open" }));
+await waitFor(teacher.inbox, (m) => m.t === "mic-changed" && m.micOpen === true);
 const pcm = new Uint8Array(3200).fill(7);
 for (let i = 0; i < 5; i++) teacher.ws.send(frame(1, i, 0, pcm));
 await sleep(1500);
@@ -86,32 +93,47 @@ console.log(`teacher received own speech frames: ${teacher.inbox.binary} (expect
 if (student.inbox.binary < 1) throw new Error("FAIL: student got no translated audio");
 if (teacher.inbox.binary !== 0) throw new Error("FAIL: speaker heard own speech");
 
-// Hand-over: student raises hand, teacher grants, student speaks.
-student.ws.send(JSON.stringify({ t: "raise-hand" }));
-await sleep(300);
-teacher.ws.send(JSON.stringify({ t: "speaking-stop" }));
-await waitFor(teacher.inbox, (m) => m.t === "floor-changed" && m.floor.kind === "none");
-const hands = teacher.inbox.control.filter((m) => m.t === "hands").pop();
-const studentId = teacher.inbox.control
-  .filter((m) => m.t === "welcome")
-  .flatMap((m) => m.roster)
-  .find((r) => r.role === "student")?.participantId;
-if (!studentId) throw new Error("FAIL: no student in roster");
-console.log(`hands raised: ${JSON.stringify(hands?.raised)}`);
-teacher.ws.send(JSON.stringify({ t: "grant", participantId: studentId }));
-await waitFor(student.inbox, (m) => m.t === "floor-changed" && m.floor.kind === "student");
-student.ws.send(JSON.stringify({ t: "speaking-start" }));
+// Simultaneous speech: Marco opens his mic while Layla keeps hers open; both
+// pipes fan out independently (PROTOCOL section 2).
+student.ws.send(JSON.stringify({ t: "mic-open" }));
+await waitFor(student.inbox, (m) => m.t === "mic-changed" && m.micOpen === true && m.participantId === studentId);
 const before = teacher.inbox.binary;
 for (let i = 0; i < 5; i++) student.ws.send(frame(1, i, 1, pcm));
 await sleep(1500);
 console.log(`teacher received student speech frames: ${teacher.inbox.binary - before} (expect >=1)`);
 if (teacher.inbox.binary - before < 1) throw new Error("FAIL: teacher got no student audio");
 
-// Revoke -> silence.
-teacher.ws.send(JSON.stringify({ t: "revoke" }));
-await waitFor(student.inbox, (m) => m.t === "floor-changed" && m.floor.kind === "none");
-console.log("revoke broadcast OK");
+// Force-mute: teacher cuts Marco's mic; reopening answers mic-forced-muted.
+teacher.ws.send(JSON.stringify({ t: "mute", participantId: studentId }));
+await waitFor(student.inbox, (m) => m.t === "mic-changed" && m.participantId === studentId && m.micOpen === false);
+await waitFor(
+  student.inbox,
+  (m) => m.t === "welcome" && m.roster.some((r) => r.participantId === studentId && r.forcedMuted === true),
+);
+student.ws.send(JSON.stringify({ t: "mic-open" }));
+await waitFor(student.inbox, (m) => m.t === "error" && m.code === "mic-forced-muted");
+console.log("force-mute + mic-forced-muted OK");
+
+// Unmute clears the force only; the student reopens their own mic. The `since`
+// cursor skips the earlier (unforced) welcomes so the predicate matches the
+// snapshot this unmute produced.
+const cursor = student.inbox.control.length;
+teacher.ws.send(JSON.stringify({ t: "unmute", participantId: studentId }));
+await waitFor(
+  student.inbox,
+  (m) => m.t === "welcome" && m.roster.some((r) => r.participantId === studentId && r.forcedMuted === false),
+  8000,
+  cursor,
+);
+student.ws.send(JSON.stringify({ t: "mic-open" }));
+await waitFor(
+  student.inbox,
+  (m) => m.t === "mic-changed" && m.participantId === studentId && m.micOpen === true,
+  8000,
+  cursor,
+);
+console.log("unmute + student self-unmute OK");
 
 teacher.ws.close();
 student.ws.close();
-console.log("\nPROD SMOKE PASS: create/join/floor/fan-out/handover/revoke all live.");
+console.log("\nPROD SMOKE PASS: create/join/mics/simultaneous fan-out/force-mute/unmute all live.");

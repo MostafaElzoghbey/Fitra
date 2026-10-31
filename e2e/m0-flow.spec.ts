@@ -5,6 +5,14 @@
 // (docs/TEST-PLAN.md 3.1), never from copy or CSS classes: the UI is RTL and
 // multilingual, so text assertions are inherently fragile.
 //
+// Flow (docs/MIC-CONTROL.md, Zoom/Meet semantics): everyone joins mic-closed.
+// The teacher opens their own mic, then Marco opens his while Layla keeps
+// talking — two independent per-speaker translation pipes at once (PROTOCOL
+// section 2). The teacher force-mutes Marco (a rejected reopen answers
+// mic-forced-muted), unmutes him, and finally runs mute-all / unmute-all;
+// students always reopen their own mics. Mic control is server-authoritative:
+// every visible state change traces back to a DO broadcast.
+//
 // Audio: `?injectAudio=1` feeds synthetic sine frames straight to
 // AudioFrameSender through the existing capture seam, so the run needs no
 // microphone and no fake-device WAV. The Chromium fake-media flags in
@@ -58,6 +66,13 @@ async function audio(page: Page): Promise<AudioCounters> {
   });
 }
 
+/** Participant indexes currently mic-open, from the mic-banner's JSON attr. */
+async function speakingOf(page: Page): Promise<number[]> {
+  const raw = await page.getByTestId("mic-banner").getAttribute("data-speaking");
+  const parsed: unknown = JSON.parse(raw ?? "[]");
+  return Array.isArray(parsed) ? parsed.map(Number) : [];
+}
+
 /**
  * Seal the context to the local origin: every off-origin request is aborted and
  * remembered, so the test can prove at the end that nothing but the decorative
@@ -100,7 +115,7 @@ async function acceptConsentAndJoin(page: Page, name: string): Promise<void> {
   await expect(page.getByTestId("join-room")).toBeEnabled();
   await page.getByTestId("display-name").fill(name);
   await page.getByTestId("join-room").click();
-  await expect(page.getByTestId("floor-banner")).toBeVisible();
+  await expect(page.getByTestId("mic-banner")).toBeVisible();
   await expect(page.getByTestId("room-error")).toHaveCount(0);
 }
 
@@ -113,7 +128,7 @@ async function joinFromHash(
   );
 }
 
-test("M0 acceptance: teacher speaks, hand, grant, student speaks, revoke", async ({
+test("M0 acceptance: simultaneous speakers, force-mute, unmute", async ({
   browser,
 }) => {
   const blocked: string[] = [];
@@ -135,89 +150,156 @@ test("M0 acceptance: teacher speaks, hand, grant, student speaks, revoke", async
     await joinFromHash(studentFr, { code, role: "student", lang: "fr" });
     await acceptConsentAndJoin(studentFr, "Aisha");
 
-    // --- roster + RTL (NFR-004) ---------------------------------------------
+    // --- roster + RTL + baseline: everyone mic-closed, nobody forced (NFR-004)
     for (const page of pages) {
       await expect(page.getByTestId("roster-count")).toHaveText("3");
       await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+      await expect(page.getByTestId("mic-banner")).toHaveAttribute("data-speaking", "[]");
+      await expect(page.getByTestId("mic-toggle")).toHaveAttribute("aria-pressed", "false");
+      await expect(page.getByTestId("mic-toggle")).toHaveAttribute("data-forced", "false");
     }
     await expect(teacher.getByTestId("roster")).toContainText("Layla");
     await expect(teacher.getByTestId("roster")).toContainText("Marco");
     await expect(teacher.getByTestId("roster")).toContainText("Aisha");
-    const studentPid = (await audio(studentEn)).pid;
-    expect(studentPid, "welcome must publish this tab's participantId").not.toBeNull();
+    const enPid = (await audio(studentEn)).pid;
+    expect(enPid, "welcome must publish this tab's participantId").not.toBeNull();
+    const frPid = (await audio(studentFr)).pid;
+    expect(frPid, "welcome must publish this tab's participantId").not.toBeNull();
     await expect(
-      teacher.getByTestId(`roster-row-${studentPid as string}`),
-    ).toBeVisible();
+      teacher.getByTestId(`roster-row-${enPid as string}`),
+    ).toHaveAttribute("data-mic", "false");
+    await expect(
+      teacher.getByTestId(`roster-row-${enPid as string}`),
+    ).toHaveAttribute("data-forced", "false");
+    // Students get no teacher controls: no mute-all/unmute-all, no row buttons.
+    await expect(studentEn.getByTestId("mute-all")).toHaveCount(0);
+    await expect(studentEn.getByTestId("unmute-all")).toHaveCount(0);
+    await expect(studentEn.getByTestId(`mute-${enPid as string}`)).toHaveCount(0);
+    await expect(studentEn.getByTestId(`unmute-${enPid as string}`)).toHaveCount(0);
 
-    // --- teacher speaks: both students hear, the speaker hears nothing ------
+    // --- teacher opens their mic: both students hear, the speaker hears nothing
     // FR-015: a speaker never receives the translation of their own speech.
     await teacher.getByTestId("mic-toggle").click();
     for (const page of pages) {
-      await expect(page.getByTestId("floor-banner")).toHaveAttribute("data-floor", "teacher");
-      await expect(page.getByTestId("floor-banner")).not.toBeEmpty();
+      await expect.poll(() => speakingOf(page)).toEqual([0]);
     }
+    await expect(teacher.getByTestId("mic-toggle")).toHaveAttribute("aria-pressed", "true");
     await expect.poll(async () => (await audio(studentEn)).received, { timeout: 30_000 }).toBeGreaterThan(0);
     await expect.poll(async () => (await audio(studentFr)).received, { timeout: 30_000 }).toBeGreaterThan(0);
     await expect.poll(async () => (await audio(studentEn)).played, { timeout: 30_000 }).toBeGreaterThan(0);
     expect((await audio(teacher)).received, "FR-015: speaker gets none of their own speech").toBe(0);
-    // Live translation pairs, one per distinct student language (FR-022).
-    await expect(teacher.getByTestId("session-ar->en")).toBeVisible();
-    await expect(teacher.getByTestId("session-ar->fr")).toBeVisible();
+    // Live translation pipes, one per speaker+student-language pair (FR-022):
+    // teacher index 0 speaks ar, so 0:ar->en and 0:ar->fr open.
+    await expect(teacher.getByTestId("session-0:ar->en")).toBeVisible();
+    await expect(teacher.getByTestId("session-0:ar->fr")).toBeVisible();
     // The speaker sees their own original and translated text (FR-034).
     await expect(teacher.getByTestId("caption-live-input")).toContainText(/in\d+/);
     await expect(teacher.getByTestId("caption-live-output")).toContainText(/out\d+/);
-    const teacherOwnTurn = (await teacher.getByTestId("caption-live-output").textContent()) ?? "";
-    expect(teacherOwnTurn, "teacher must see their own translated text").toContain("out");
 
-    // --- raise hand -> grant -> student speaks -> teacher receives ----------
-    await teacher.getByTestId("mic-toggle").click();
-    await expect(teacher.getByTestId("floor-banner")).toHaveAttribute("data-floor", "none");
-
-    await studentEn.getByTestId("raise-hand").click();
-    await expect(teacher.getByTestId("hands-summary")).not.toBeEmpty();
-    await teacher.getByTestId(`grant-${studentPid as string}`).click();
-    for (const page of pages) {
-      await expect(page.getByTestId("floor-banner")).toHaveAttribute("data-floor", "student");
-    }
-    await expect(teacher.getByTestId("revoke")).toBeVisible();
-
-    const teacherBefore = (await audio(teacher)).received;
+    // --- Marco opens his mic while Layla keeps talking: independent pipes -----
     await studentEn.getByTestId("mic-toggle").click();
+    for (const page of pages) {
+      await expect.poll(() => speakingOf(page)).toEqual([0, 1]);
+    }
+    const teacherBefore = (await audio(teacher)).received;
     await expect.poll(async () => (await audio(teacher)).received, { timeout: 30_000 }).toBeGreaterThan(teacherBefore);
-    await expect(teacher.getByTestId("session-en->ar")).toBeVisible();
-    // The teacher's own earlier turn stays committed at the top of the
-    // transcript; the student's turn is appended below it instead of
-    // replacing it (T-027). Committed turns are oldest-first, so index 0 is
-    // the teacher's turn (interims may have advanced past the captured one).
-    const teacherTurn = teacher.getByTestId("caption-history-0");
-    await expect(teacherTurn).toContainText(/in\d+/);
-    await expect(teacherTurn).toContainText(/out\d+/);
+    await expect(teacher.getByTestId("session-1:en->ar")).toBeVisible({ timeout: 30_000 });
 
-    // --- metrics panel: browser latency + real DO session rows --------------
+    // --- teacher force-mutes Marco: row flags, notice, rejected reopen --------
+    await teacher.getByTestId(`mute-${enPid as string}`).click();
+    for (const page of pages) {
+      await expect(
+        page.getByTestId(`roster-row-${enPid as string}`),
+      ).toHaveAttribute("data-forced", "true", { timeout: 30_000 });
+      await expect(
+        page.getByTestId(`roster-row-${enPid as string}`),
+      ).toHaveAttribute("data-mic", "false");
+      await expect.poll(() => speakingOf(page)).toEqual([0]);
+    }
+    await expect(studentEn.getByTestId("forced-muted-notice")).toBeVisible();
+    // A closed row offers the teacher the clear-force button instead.
+    await expect(teacher.getByTestId(`mute-${enPid as string}`)).toHaveCount(0);
+    await expect(teacher.getByTestId(`unmute-${enPid as string}`)).toBeVisible();
+    // Marco tries to reopen anyway: the DO answers mic-forced-muted.
+    await studentEn.getByTestId("mic-toggle").click();
+    await expect(studentEn.getByTestId("room-error")).toBeVisible({ timeout: 30_000 });
+
+    // --- force-mute must silence the pipe ------------------------------------
+    const frozen = (await audio(teacher)).received;
+    await teacher.waitForTimeout(2_000);
+    expect((await audio(teacher)).received, "force-mute must silence the teacher's pipe").toBe(frozen);
+
+    // --- teacher clears the force: banner resets, Marco reopens himself -------
+    await teacher.getByTestId(`unmute-${enPid as string}`).click();
+    await expect(
+      studentEn.getByTestId(`roster-row-${enPid as string}`),
+    ).toHaveAttribute("data-forced", "false", { timeout: 30_000 });
+    await expect(studentEn.getByTestId("forced-muted-notice")).toHaveCount(0);
+    // The roster snapshot the unmute carries also retires the stale error.
+    await expect(studentEn.getByTestId("room-error")).toHaveCount(0, { timeout: 30_000 });
+    // Unmuting only clears the force; the mic stays closed until Marco opens it.
+    await expect(studentEn.getByTestId("mic-toggle")).toHaveAttribute("aria-pressed", "false");
+    for (const page of pages) {
+      await expect.poll(() => speakingOf(page)).toEqual([0]);
+    }
+    await studentEn.getByTestId("mic-toggle").click();
+    for (const page of pages) {
+      await expect.poll(() => speakingOf(page)).toEqual([0, 1]);
+    }
+    await expect.poll(async () => (await audio(teacher)).received, { timeout: 30_000 }).toBeGreaterThan(frozen);
+
+    // --- mute-all latches everyone but the teacher; unmute-all clears only the
+    // force, so each student reopens their own mic (MIC-CONTROL.md).
+    await teacher.getByTestId("mute-all").click();
+    for (const page of pages) {
+      await expect(
+        page.getByTestId(`roster-row-${enPid as string}`),
+      ).toHaveAttribute("data-forced", "true", { timeout: 30_000 });
+      await expect(
+        page.getByTestId(`roster-row-${frPid as string}`),
+      ).toHaveAttribute("data-forced", "true", { timeout: 30_000 });
+      await expect(
+        page.getByTestId(`roster-row-${frPid as string}`),
+      ).toHaveAttribute("data-mic", "false");
+      await expect.poll(() => speakingOf(page)).toEqual([0]);
+    }
+    await expect(studentEn.getByTestId("forced-muted-notice")).toBeVisible();
+    await expect(studentFr.getByTestId("forced-muted-notice")).toBeVisible();
+    await teacher.getByTestId("unmute-all").click();
+    for (const page of pages) {
+      await expect(
+        page.getByTestId(`roster-row-${enPid as string}`),
+      ).toHaveAttribute("data-forced", "false", { timeout: 30_000 });
+      await expect(
+        page.getByTestId(`roster-row-${frPid as string}`),
+      ).toHaveAttribute("data-forced", "false", { timeout: 30_000 });
+      await expect(
+        page.getByTestId(`roster-row-${enPid as string}`),
+      ).toHaveAttribute("data-mic", "false");
+    }
+    await studentEn.getByTestId("mic-toggle").click();
+    for (const page of pages) {
+      await expect.poll(() => speakingOf(page)).toEqual([0, 1]);
+    }
+
+    // --- metrics panel: browser latency + real DO session rows ---------------
     await expect(teacher.getByTestId("metrics-panel")).toBeVisible();
     await expect(teacher.getByTestId("metric-latency")).toHaveAttribute("data-latency-ms", /\d+/);
     await expect(teacher.getByTestId("metric-latency")).toHaveAttribute("data-source", "local");
     await expect(teacher.getByTestId("metric-latency")).toHaveAttribute("data-samples", /[1-9]/);
     await expect(teacher.getByTestId("metric-sessions")).toBeVisible();
-    await expect(teacher.getByTestId("metric-session-ar->en")).toHaveAttribute("data-status", "live");
-    await expect(teacher.getByTestId("metric-session-ar->fr")).toHaveAttribute("data-status", "live");
-    await expect(teacher.getByTestId("metric-session-en->ar")).toHaveAttribute("data-status", "live");
+    await expect(teacher.getByTestId("metric-session-0:ar->en")).toHaveAttribute("data-status", "live", { timeout: 30_000 });
+    await expect(teacher.getByTestId("metric-session-0:ar->fr")).toHaveAttribute("data-status", "live", { timeout: 30_000 });
+    await expect(teacher.getByTestId("metric-session-1:en->ar")).toHaveAttribute("data-status", "live", { timeout: 30_000 });
 
-    // --- captions: fake transcripts reach the room live ---------------------
+    // --- captions: committed turns persist oldest-first ----------------------
+    // Marco's turn committed when the teacher force-muted him (mic close is a
+    // turn boundary for that speaker only); Layla's turn stays live since she
+    // never closed her mic.
     await expect(teacher.getByTestId("captions")).toBeVisible();
-    await expect(teacher.getByTestId("caption-live-input")).toContainText(/in\d+/);
-    await expect(teacher.getByTestId("caption-live-output")).toContainText(/out\d+/);
+    await expect(teacher.getByTestId("caption-history-0")).toContainText(/in\d+/);
+    await expect(teacher.getByTestId("caption-history-0")).toContainText(/out\d+/);
     await expect(teacher.getByTestId("caption-live-output")).toHaveAttribute("aria-live", "polite");
-
-    // --- revoke -> silence --------------------------------------------------
-    await teacher.getByTestId("revoke").click();
-    for (const page of pages) {
-      await expect(page.getByTestId("floor-banner")).toHaveAttribute("data-floor", "none");
-    }
-    await studentEn.getByTestId("mic-toggle").click();
-    const frozen = (await audio(teacher)).received;
-    await teacher.waitForTimeout(2_000);
-    expect((await audio(teacher)).received, "after revoke the teacher must hear silence").toBe(frozen);
 
     // --- zero outbound network, zero Gemini, zero secrets --------------------
     const stray = blocked.filter((url) => !FONT_URL.test(url));
