@@ -8,11 +8,11 @@ Each task ≤ half a day, independently testable, with acceptance + proving test
 |---|---|---|---|
 | T-001 | Repo skeleton: `web/` (Vite+React+TS+Tailwind+i18n+RTL), `worker/` (Hono), `packages/shared` (protocol types), pnpm + wrangler.jsonc per ARCHITECTURE §5, strict TS | `pnpm dev` serves stub UI; `wrangler deploy --dry-run` ok | tsc |
 | T-002 | Protocol codec (`packages/shared`): binary header + JSON guards | Round-trip + reject cases pass | unit |
-| T-003 | Floor-control machine (pure module, table rows 1–12) | Exhaustive transition tests pass | unit |
+| T-003 | Mic-policy machine (pure module, `docs/MIC-CONTROL.md` table) | Exhaustive transition tests pass | unit |
 | T-004 | `TranslationProvider` interface + `FakeTranslationProvider` (echo+tag, delay, failure injection) | Fake loops audio with configured delay; injectable failure fires `onStatus` | unit |
 | T-005 | Hono: `POST /rooms` (code+config), `POST /rooms/:code/join` (HMAC token), kill switch, validation-before-DO | Invalid join → 4xx without DO hit; token verifies | DO-pool test |
 | T-006 | ClassRoom DO: membership + upgrade auth + roster + Hibernation WS | 2 tabs join, roster correct; bad token → 401 | DO-pool test |
-| T-007 | Floor control wired in DO (grant/deny/revoke/autoGrant, preempt, broadcasts) | Tab scenario follows transition table | DO-pool + E2E |
+| T-007 | Mic control wired in DO (mic-open/close, mute/unmute/mute-all/unmute-all, force-mute cuts, broadcasts) | Tab scenario follows `docs/MIC-CONTROL.md` table | DO-pool + E2E |
 | T-008 | SessionManager: lazy/shared/refcount/idle-close/cap+degradation | 2 same-target listeners = 1 session; overflow → `degraded`, teacher leg kept | unit + DO-pool |
 | T-009 | DO audio fan-out (binary forward, same-lang passthrough, speaker excluded, rate limits) with Fake | en+fr students get frames; ar teacher gets none of own speech | DO-pool |
 | T-010 | Browser capture (AudioWorklet 16 kHz mono, 100 ms frames, device select, gesture resume) | Mic → frames on socket at ~10/s; denial shows hint | E2E (fake mic file) |
@@ -38,10 +38,13 @@ Each task ≤ half a day, independently testable, with acceptance + proving test
 | T-025 | Mic-off tail + sender captions: `speaking-stop` flushes provider input (`audioStreamEnd`); floor changes never interrupt listeners' playback; the source speaker also receives their own `input`/`output` captions | Buffered speech still translates after mic-off; listeners hear the tail; speaker sees both caption kinds; same-language non-speakers stay excluded | `worker/tests/{gemini,sessions,fanout}.test.ts` + `web/tests/floor-gate.test.ts` + E2E |
 | T-026 | Playback burst completeness: never shed audio already scheduled on the audio clock; keep only unscheduled audio under the 800 ms safety cap | A 3 s provider burst schedules all 30 frames with zero overruns; mic-off tail is not truncated | `web/tests/playback-scheduler.test.ts` |
 | T-027 | Chat-style caption transcript: one bubble per input+output turn, old turns persist while new turns append below across speaker changes, no line clamp, capped-height scroll area that auto-follows only near the bottom | Long text wraps and scrolls; a prior speaker's turn stays on screen when the next person talks; reader who scrolled up is not yanked down | `web/tests/captions.test.ts` + E2E caption history |
+| T-028 | Mic model (Zoom/Meet): remove floor/raise-hand; teacher `mute`/`unmute`/`mute-all`/`unmute-all`; student free mic; per-speaker translation pipes (`speakerIndex:src→tgt`); downlink per-pipe seq + client per-speaker playback demux; caption `speaker` tag | Teacher + student speak SIMULTANEOUSLY, each translated into independent pipes; teacher mute-all cuts every open student mic; force-muted student mic-open refused; unmute-all restores free unmute | `worker/tests/mic*.test.ts` + DO-pool + E2E concurrent-talk |
 
 M0 acceptance (end to end): teacher tab (ar) speaks → student tab (en) hears
-English; student raises hand → granted → speaks → teacher hears Arabic;
-metrics panel shows latency. Deployable via `wrangler deploy`.
+English; student opens mic (no permission needed) → speaks → teacher hears
+Arabic — even simultaneously with the teacher; teacher mutes the student →
+student mic closes and cannot reopen until unmuted; metrics panel shows
+latency. Deployable via `wrangler deploy`.
 
 ## M1 "Multi-language & resilience" (coarse)
 

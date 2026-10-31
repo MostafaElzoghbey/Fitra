@@ -7,11 +7,11 @@ failure injection). Real Gemini only in the opt-in manual smoke test.
 
 | Target | Cases | Proves |
 |---|---|---|
-| Floor-control machine | all 12 table rows in `docs/FLOOR-CONTROL.md` + FIFO hands, preempt, double-teacher, disconnect mid-speech | FR-010–016 |
+| Mic-policy machine (`worker/src/mic.ts`) | every row of `docs/MIC-CONTROL.md`: mic-open/close, force-mute refuses mic-open, mute cuts an open mic (flush + release), mute-all + late joiner inherits, unmute never auto-opens, unknown pid → `mute-absent`, double-teacher, disconnect mid-speech | FR-010–016 |
 | SessionManager | lazy open, refcount share (2 listeners 1 session), idle-close, cap overflow protects teacher leg, reconnect backoff sequence | FR-020–025 |
 | Protocol codec | header encode/decode, seq wrap, oversize reject, bad version reject, JSON type guards | `docs/PROTOCOL.md` |
 | Join token | sign/verify, expiry, tamper reject, role binding, rejoin verify (`ignoreExpiry`) re-signing the SAME pid | FR-003/050 |
-| Caption reducer (`web/tests/captions.test.ts`) | interim replaces in place, a turn (input+output) commits when every non-empty live kind is final, `commitLiveCaptions` safety commit (new-holder floor change / missing turnComplete; floor→none keeps the turn live), next interim never overwrites committed turns, 50-turn cap evicts oldest, input/output lines independent, stray final ignored, RTL text passes through unchanged | FR-034/035 |
+| Caption reducer (`web/tests/captions.test.ts`) | interim replaces in place, a turn (input+output) commits when every non-empty live kind is final, `commitLiveCaptions` safety commit (mic-changed `micOpen:false` for that speaker / missing turnComplete; other speakers' mic changes keep the turn live), slots keyed by speaker (two concurrent speakers never overwrite each other), next interim never overwrites committed turns, 50-turn cap evicts oldest, input/output lines independent, stray final ignored, RTL text passes through unchanged | FR-034/035 |
 | Metrics aggregation (`worker/tests/metrics.test.ts`) | sliding 1 s rate window, 60 s error window, session snapshot ordering, throttled emit (≤1/2 s), immediate emit on status change, idle room emits nothing | FR-040–043 |
 
 ## 2. Durable Object (Vitest + Cloudflare Workers pool)
@@ -23,20 +23,25 @@ runs on the default threads pool, `tests/room.test.ts` runs on the Workers pool
 because the Hibernation WebSocket API only exists inside workerd. It connects
 with real `WebSocketPair`s through `env.CLASSROOM.getByName(roomCode)`, pinning
 `MAX_STUDENTS=1` and a test-only `JOIN_TOKEN_HMAC_SECRET` as Miniflare bindings.
-Drive the DO with Fake provider: join teacher+students, grant floor, push
+Drive the DO with Fake provider: join teacher+students, open mics, push
 PCM frames, assert fan-out per language, same-language relay resampled 16→24 kHz,
-non-floor audio dropped, rate-limit trips. Hono routes tested via
+audio from a closed mic dropped, force-mute cut, rate-limit trips. Hono routes tested via
 `app.request` (source: `https://hono.dev/docs/guides/testing`).
 
 M0.5 latency/quality suite (`tests/fanout.test.ts`, describe
-"pair-fanout dedupe, pre-warm, captions, rejoin"): each translation pair
+"pipe-fanout dedupe, pre-warm, captions, rejoin"): each translation pipe
 receives exactly ONE uplink feed per frame regardless of listener count
 (N same-language listeners share one session feed); sessions pre-warm at
-floor grant (`session-status` arrives before any audio); caption routing
-(both kinds → target-language members,
-speaker and same-language listeners get neither); teacher socket replacement
-keeps the membership row and floor (`teacher-rejoin` broadcast, no
+mic-open (`session-status` arrives before any audio); caption routing
+(both kinds → members whose join language matches the pipe target, tagged
+with the pipe's source speaker index; same-language listeners other than
+the speaker get neither, and the speaker keeps seeing their own captions
+(FR-034)); teacher socket replacement
+keeps the membership row and mic/force-mute state (`teacher-rejoin` broadcast, no
 `error{teacher-taken}`, replaced socket's close cannot evict the row).
+Concurrent-speaker suite (`tests/mic-do.test.ts`): teacher + two students with
+mics open at once — three pipe sets, per-speaker downlink seq cursors, no
+cross-feed between same-target sessions.
 
 M0.6 observability suite (`tests/metrics-do.test.ts`): a live room receives
 `metrics` within 2 s of audio/control activity; the frame validates against
@@ -54,22 +59,23 @@ target-language sockets (already covered in fanout, re-asserted here).
 - Fake media flags: `--use-fake-device-for-media-stream`,
   `--use-file-for-fake-audio-capture=<wav>` (verify or correct in OQ-10).
 - Flow: create → join ×2 → teacher speaks (WAV in) → students receive audio
-  (assert `audioFramesReceived > 0` via console/panel hooks); raise-hand →
-  grant → student speaks → teacher receives; revoke → silence; metrics panel
+  (assert `audioFramesReceived > 0` via console/panel hooks); student opens
+  mic → speaks → teacher receives — while the teacher mic is ALSO open
+  (concurrent pipes); teacher `mute` on the student → student mic closes and
+  `mic-open` is refused; `unmute` → student can open again; metrics panel
   shows latency number.
 - CI-safe: no secrets, no network beyond localhost/Miniflare.
 
 M0.6 E2E additions: the room shell is launched with `FAKE_EMIT_TRANSCRIPTS=1`;
 after the teacher speaks, the `en` student sees `captions` — a chronological
 chat-style transcript — with a live `output` line (the fake emits non-final
-segments; committing turns, the new-holder safety commit and the 50-turn cap
+segments; committing turns, the mic-close safety commit and the 50-turn cap
 are covered by `web/tests/captions.test.ts`), and the teacher sees
-their own `input` and `output` captions while still holding the floor. On
-`speaking-stop` the provider receives `audioStreamEnd` and the translated tail
-keeps playing for listeners; only a tab that loses the floor to a new holder
-interrupts its own playback, never on floor→`none`
-(`web/tests/floor-gate.test.ts`).
-`metric-sessions` now lists `ar->en` and `ar->fr` from the DO broadcast
+their own `input` and `output` captions while their mic is open. On
+`mic-close` the provider receives `audioStreamEnd` and the translated tail
+keeps playing for listeners; a mic change never interrupts any listener's
+playback (`web/tests/playback-scheduler.test.ts` covers per-speaker queues).
+`metric-sessions` now lists `0:ar->en` and `0:ar->fr` from the DO broadcast
 (`data-status="live"`), proving FR-040/041 instead of asserting the old
 "no server metrics" gap. The caption live region is asserted to be
 `aria-live="polite"` and to inherit `dir="rtl"` on the Arabic UI, and the
@@ -93,11 +99,11 @@ multilingual, so text assertions are inherently fragile.
 |---|---|---|
 | Join | `consent-modal`, `consent-accept`, `consent-decline`, `consent-lang` | `join-room` stays disabled until `consent-accept` |
 | Join | `join-room`, `room-code-input`, `display-name`, `role-group`, `participant-lang` | |
-| Create | `create-room`, `teacher-name`, `teacher-lang`, `toggle-auto-grant`, `toggle-classmates`, `consent-confirm`, `room-code` | |
-| Room | `floor-banner` | carries `data-floor` = `none`/`teacher`/`student` |
-| Room | `raise-hand`, `lower-hand`, `revoke` | |
-| Room | `roster`, `roster-row-<participantId>`, `grant-<participantId>`, `deny-<participantId>` | `participantId` comes from `welcome` |
-| Room | `mic-toggle`, `test-deployment-badge`, `headphones-hint`, `room-error` | |
+| Create | `create-room`, `teacher-name`, `teacher-lang`, `toggle-classmates`, `consent-confirm`, `room-code` | |
+| Room | `mic-banner` | carries `data-speaking` = JSON list of participantIndexes with an open mic (empty list when nobody speaks) |
+| Room | `mic-toggle`, `test-deployment-badge`, `headphones-hint`, `room-error` | `mic-toggle` stays enabled; while teacher-force-muted it carries `data-forced="true"`, a press is rejected with `mic-forced-muted` and the forced-muted notice renders |
+| Room | `mute-all`, `unmute-all` | teacher-only controls in the room bar |
+| Room | `roster`, `roster-row-<participantId>`, `mute-<participantId>`, `unmute-<participantId>` | `participantId` comes from `welcome`; row carries `data-mic="true|false"` and `data-forced="true|false"`; the leading control is `mute-` for any unforced student (even a quiet one) and `unmute-` for a forced one; teacher-only |
 | Room | `room-disconnected`, `room-code-banner` | `room-disconnected` shows while the socket is down and the client rejoin retries are exhausted or blocked |
 | Room | `captions`, `captions-empty`, `caption-live-input`, `caption-live-output`, `caption-history`, `caption-history-<index>` | chat-style transcript: committed turns (`caption-history-<index>`) persist oldest-first, the live turn appends below and updates in place; the transcript area scrolls; `captions-empty` until the first caption |
 | Room | `metrics-mount` | T-012 renders the panel inside this node |
@@ -107,8 +113,11 @@ multilingual, so text assertions are inherently fragile.
 
 Integration seams owned by T-013, consumed by later tasks:
 
-- **T-010/T-011** — `RoomProps.onMicToggle(muted)` and `RoomProps.micError`;
-  raw frames flow through `RoomSocket.sendAudio` / `RoomSocket.onAudio`.
+- **T-010/T-011** — Room attaches `attachRoomAudio` itself; the mic gesture
+  drives `RoomAudioHandle.openMic` / `RoomAudioHandle.closeMic`
+  (`web/src/audio/roomShell.ts`). `RoomProps.onMicToggle`/`micError` remain
+  optional observer hooks. Raw frames flow through `RoomSocket.sendAudio` /
+  `RoomSocket.onAudio`.
 - **T-012** — `RoomProps.renderMetrics(metrics)` renders into `#metrics-mount`.
   Latency is measured in the browser (`web/src/audio/latency.ts`, first
   translated chunk back, polled from `AudioFrameSender.stats.framesSent` and

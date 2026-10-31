@@ -18,9 +18,9 @@ Spec-only. All external facts cite the doc URL next to the claim.
 
 | Component | Responsibility | Notes |
 |---|---|---|
-| React SPA (Vite+TS+Tailwind, Workers Static Assets) | Capture/playback audio, floor UI, metrics panel, RTL/i18n | Static-asset requests are free/unlimited on Workers Free (source: `https://developers.cloudflare.com/workers/platform/pricing/`) |
+| React SPA (Vite+TS+Tailwind, Workers Static Assets) | Capture/playback audio, mic UI + teacher mute controls, metrics panel, RTL/i18n | Static-asset requests are free/unlimited on Workers Free (source: `https://developers.cloudflare.com/workers/platform/pricing/`) |
 | Hono on Workers | `POST /rooms`, `POST /rooms/:code/join` (mints HMAC token), serves SPA, kill switch | Validate BEFORE touching the DO: "Both Workers and Durable Objects are billed based on the number of requests. Validate requests in your Worker" (source: `https://developers.cloudflare.com/durable-objects/best-practices/websockets/`) |
-| ClassRoom DO (SQLite-backed) | Floor control, fan-out, TranslationProvider sessions, rate limits | Free plan allows ONLY SQLite-backed DOs (source: `https://developers.cloudflare.com/durable-objects/platform/pricing/`). One instance per room via `idFromName(roomCode)` |
+| ClassRoom DO (SQLite-backed) | Mic control (server-authoritative), fan-out, TranslationProvider sessions, rate limits | Free plan allows ONLY SQLite-backed DOs (source: `https://developers.cloudflare.com/durable-objects/platform/pricing/`). One instance per room via `idFromName(roomCode)` |
 | TranslationProvider | Gemini / Fake behind one interface | Key only in Worker secret; DO opens outbound WSS to Gemini |
 
 ## 2. Sequence diagrams
@@ -49,22 +49,23 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    participant S as Student (en, floor holder)
+    participant S as Student (en, mic open)
     participant DO as ClassRoom DO
     participant G1 as Gemini en→ar
     participant G2 as Gemini en→fr
     participant T as Teacher (ar)
     participant C as Classmate (fr)
-    S->>DO: raise-hand → granted → audio frames
+    S->>DO: mic-open → audio frames
     DO->>G1: realtime audio in
     DO->>G2: realtime audio in (iff classmatesHearStudent)
     G1-->>DO: audio (ar)
     G2-->>DO: audio (fr)
     DO->>T: audio frames (ar)
     DO->>C: audio frames (fr)
+    Note over S,T: teacher mic may be open simultaneously —<br/>two independent pipe sets, no mixing
 ```
 
-### 2.3 Floor change (preemption + revoke)
+### 2.3 Teacher force-mute
 
 ```mermaid
 sequenceDiagram
@@ -72,11 +73,31 @@ sequenceDiagram
     participant T as Teacher
     participant DO as ClassRoom DO
     participant All as All clients
-    T->>DO: speaking-start (or revoke)
-    DO->>DO: close/suspend student sessions; state=TEACHER_SPEAKING
-    DO->>All: floor-changed {holder: teacher}
-    T->>DO: audio… / speaking-stop
-    DO->>All: floor-changed {holder: none}
+    T->>DO: mute (or mute-all)
+    DO->>S: mic-changed {micOpen:false}  (socket cut)
+    DO->>DO: flush student input (audioStreamEnd); tail keeps flowing
+    DO->>All: welcome roster (forcedMuted:true) + mic-changed
+    S->>DO: mic-open attempt
+    DO->>S: error {mic-forced-muted}  (mic stays closed)
+```
+
+### 2.4 Concurrent pipes (same target language, two speakers)
+
+```mermaid
+sequenceDiagram
+    participant T as Teacher (ar, mic open)
+    participant S as Student (en, mic open)
+    participant DO as ClassRoom DO
+    participant G1 as pipe T: ar→en
+    participant G2 as pipe S: en→ar
+    participant L as Listener (ar)
+    T->>DO: audio frames (ar)
+    S->>DO: audio frames (en)
+    DO->>G1: teacher frames only
+    DO->>G2: student frames only
+    G1-->>L: teacher's translated audio
+    G2-->>L: student's translated audio
+    Note over L: demuxed by downlink speaker index,<br/>parallel jitter queues, browser mixes
 ```
 
 ### 2.4 Translation session failure
@@ -171,18 +192,21 @@ export interface TranslationProvider {
 }
 ```
 
-- **SessionManager** (pure logic, unit-tested): `key = src→tgt`, lazy open,
+- **SessionManager** (pure logic, unit-tested): `key = speakerIndex:src→tgt`
+  (one pipe per open mic × target language), lazy open,
   refcount by listener set, idle-close (default 60 s), cap
   `maxTranslationSessions` (default 8). Overflow policy: protect teacher-leg
   sessions, then earliest-created; overflowed listeners receive
   `session-degraded` + muted translated track (FR-024).
-  M0.5 latency/quality additions the DO wraps around it: floor grants open
-  the pair set eagerly (ensureSession effect → `prewarmSessions`) so the
-  first spoken frame does not pay the session-opening gap; each frame is fed
-  to a pair exactly ONCE regardless of listener count (a per-listener feed
-  garbles streaming transcription and multiplied speaker turns); `onTranscript`
-  events are routed as `caption` frames to the pair's target-language
-  sockets (both kinds — PROTOCOL.md section 3.1); membership language
+  M0.5 latency/quality additions the DO wraps around it: a mic-open
+  pre-warms the speaker's pair set eagerly (ensureSession effect →
+  `prewarmSessions`) so the first spoken frame does not pay the
+  session-opening gap; each frame is fed to a pipe exactly ONCE regardless of
+  listener count (a per-listener feed garbles streaming transcription and
+  multiplied speaker turns); `onTranscript`
+  events are routed as `caption` frames (tagged with the pipe's source
+  `speaker` index) to the target-language sockets of that pipe (both kinds —
+  PROTOCOL.md section 3.1); membership language
   lookups are cached until any membership
   row changes (previously 2 SQLite reads/frame at 10 frames/s speaker).
 - **Gemini provider** (documented parameters; wire details to verify in OQ-01):
@@ -225,9 +249,9 @@ speed/rate control, glossary or prompt steering, and per-word translation
 timing. None of them are documented capabilities of this model, so exposing
 controls would be a lie (AGENTS.md: never fake a capability).
 
-Latency levers we do control: (1) pre-warm the pair set at floor grant
-(already wired); (2) feed each pair exactly once per frame (already wired);
-(3) keep the DO byte-forwarding path free of parsing; (4) avoid extra
+Latency levers we do control: (1) pre-warm the speaker's pair set at
+mic-open (already wired); (2) feed each pipe exactly once per frame (already
+wired); (3) keep the DO byte-forwarding path free of parsing; (4) avoid extra
 client-side pre-roll — the current 400 ms playback pre-roll is a deliberate
 jitter trade-off, revisited only with measurements (OQ-06); (5) never shed
 audio already scheduled on the audio clock — the 800 ms cap applies only to
@@ -255,7 +279,7 @@ in one burst and cutting the horizon truncated the tail (T-026).
     "SUPPORTED_LANGUAGES": ["ar", "en", "fr", "es"],
     "MAX_STUDENTS": 30, "MAX_TRANSLATION_SESSIONS": 8,
     "SESSION_IDLE_CLOSE_S": 60, "MAX_ROOM_MINUTES": 120,
-    "AUTO_GRANT": false, "CLASSMATES_HEAR_STUDENT": true,
+    "CLASSMATES_HEAR_STUDENT": true,
     "ROOM_CREATION_DISABLED": false
   }
 }
@@ -265,8 +289,11 @@ in one burst and cutting the horizon truncated the tail (T-026).
 
 ## 6. Key decisions (why)
 
-1. **Half duplex** — quality + cost (one stream, ≤3 sessions), not a media
-   limitation.
+1. **Multi-speaker mic model (Zoom/Meet semantics)** — the former half-duplex
+   rule was a product choice, not a media limitation; users expect free
+   unmute + teacher force-mute + simultaneous talk. Cost stays bounded by the
+   per-speaker pipe model (session cap + FR-024 degradation), not by
+   one-speaker gating. See `docs/MIC-CONTROL.md`.
 2. **DO-side Gemini fan-in/fan-out** — key never in browser; one uplink stream
    serves all listeners of a language; matches free-tier billing (outgoing WS
    messages free).

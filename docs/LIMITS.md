@@ -80,7 +80,9 @@ pretend they exist.
 
 ## 3. One-hour class budget: 1 teacher + 10 students, 3 languages (ar/en/fr)
 
-Assumptions: half-duplex (one speaker), 100 ms frames, ~40 min actual speech.
+Assumptions: one active speaker at a time (worst case is stable classroom
+flow; the mic model permits simultaneous open mics, whose cost scales per
+open mic — pipes, uplink, inbound), 100 ms frames, ~40 min actual speech.
 
 | Item | Math | Result |
 |---|---|---|
@@ -94,5 +96,7 @@ Assumptions: half-duplex (one speaker), 100 ms frames, ~40 min actual speech.
 
 Headroom check: 1 800 billed req ≪ 100 000/day; one room-hour = 450 GB-s,
 so ~28 sequential room-hours (or ~3 concurrent 8-hour rooms) fit the free day.
-30-student rooms: inbound unchanged (one speaker); outbound fan-out free —
-scale limit is CPU-per-event and the 6-outbound-connection cap, not billing.
+30-student rooms: outbound fan-out free; inbound and Gemini sessions scale
+with concurrent open mics (each adds one uplink plus one pipe set per target
+language) — the practical cap is simultaneous speakers × the 6-outbound-
+connection limit, not billing.

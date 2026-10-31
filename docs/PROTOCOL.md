@@ -39,39 +39,55 @@ M0-stable: M2 auth mints the same join token claims without changing it (FR-003)
 | `ver` | 1 | `0x01` |
 | `type` | 1 | `0x01` client→DO (16 kHz input); `0x02` DO→client (24 kHz output) |
 | `seq` | 2 | Per-sender monotonic counter, wraps; gap = loss metric |
-| `speaker` | 2 | `participantIndex` assigned at join (0 = teacher) |
+| `speaker` | 2 | `participantIndex` assigned at join (0 = teacher). Uplink: the sender's own index. Downlink: the **source** speaker the translated audio belongs to (clients demultiplex parallel pipes by this field) |
 | payload | N | 3 200 B nominal (100 ms @16 kHz) uplink; downlink is 24 kHz in 100 ms nominal units (4 800 B), but translated turns arrive in arbitrary chunk sizes so the DO splits them into ≤8 KiB frames; same-language relay is resampled 16→24 kHz and re-wrapped as `0x02` |
 
 Rules: max frame 8 KiB (larger → drop + `error`); unknown `ver` → drop +
-`error`; sequence gaps tolerated (jitter buffer), never retransmitted.
+`error`; sequence gaps tolerated (jitter buffer), never retransmitted. Downlink
+`seq` is per (listener, speaker-pipe): each source speaker's stream keeps an
+independent monotonic cursor at the client, because multiple speakers may fan
+out concurrently into the same socket.
 
 ## 3. JSON control messages
 
+> Revised 2026-10-28: the raise-hand / grant / single-floor model was replaced
+> by Zoom/Meet-style mic control (**`docs/MIC-CONTROL.md`**, renamed from the
+> half-duplex FLOOR-CONTROL doc). Multiple participants may have their mic open
+> at once; each open mic is one independent translation source with its own
+> provider sessions per target language. Wire history: `speaking-start/stop` →
+> `mic-open/close`; `floor-changed`/`hands` → `mic-changed` + `welcome` roster
+> re-broadcast; `raise-hand`/`lower-hand`/`grant`/`deny`/`revoke` removed;
+> `mute`/`unmute`/`mute-all`/`unmute-all` added; `caption` carries a `speaker`
+> index; `session-status.pair` is speaker-scoped.
+
 ```ts
 type Role = "teacher" | "student";
-type FloorHolder = { kind: "none" } | { kind: "teacher" } | { kind: "student"; participantId: string };
+
+interface RosterEntry {
+  participantId: string; participantIndex: number;
+  name: string; role: Role; lang: string;
+  micOpen: boolean;        // live mic state on the CURRENT socket (never persisted)
+  forcedMuted: boolean;    // teacher force-mute; students only (teacher is never forced)
+}
 
 type ClientMsg =
-  | { t: "speaking-start" }            // teacher: takes floor; student: only if granted
-  | { t: "speaking-stop" }
-  | { t: "raise-hand" }                // student only
-  | { t: "lower-hand" }                // student only
-  | { t: "grant"; participantId: string }  // teacher only
-  | { t: "deny"; participantId: string }   // teacher only
-  | { t: "revoke" }                    // teacher only
+  | { t: "mic-open" }                       // any role; a force-muted student gets an error
+  | { t: "mic-close" }                      // any role
+  | { t: "mute-all" }                       // teacher only: force-mute EVERY student
+  | { t: "unmute-all" }                     // teacher only: clear every student force-mute
+  | { t: "mute"; participantId: string }    // teacher only: force-mute one student
+  | { t: "unmute"; participantId: string }  // teacher only: clear one student force-mute
   | { t: "ping"; id: number };
 
 type ServerMsg =
-  | { t: "welcome"; participantId: string; participantIndex: number; floor: FloorHolder; roster: RosterEntry[] }
-  | { t: "floor-changed"; floor: FloorHolder; reason: string }
-  | { t: "hands"; raised: string[] }   // participantIds, teacher only sees full list; students see count
+  | { t: "welcome"; participantId: string; participantIndex: number; roster: RosterEntry[] }
+  | { t: "mic-changed"; participantId: string; micOpen: boolean }
   | { t: "session-status"; pair: string; status: "connecting" | "live" | "reconnecting" | "failed" | "degraded"; attempt?: number }
-  | { t: "caption"; kind: "input" | "output"; text: string; final: boolean }
+  | { t: "caption"; kind: "input" | "output"; text: string; final: boolean; speaker: number }
   | { t: "metrics"; m: RoomMetrics }
   | { t: "error"; code: string; message: string }
   | { t: "pong"; id: number };
 
-interface RosterEntry { participantId: string; name: string; role: Role; lang: string; }
 interface RoomMetrics {
   e2eLatencyMs: number | null;  // speaker chunk sent -> first translated chunk back (rolling)
   sessions: { pair: string; status: string; reconnects: number }[];
@@ -81,67 +97,74 @@ interface RoomMetrics {
 ```
 
 Error codes: `unauthorized`, `teacher-taken`, `room-full`,
-`unsupported-language`, `not-your-floor`, `rate-limited`, `frame-too-large`,
+`unsupported-language`, `mic-forced-muted` (a force-muted student sent
+`mic-open` — refused, mic stays closed), `mic-closed` (audio frame from a
+participant whose mic is closed — frame dropped, violation counted),
+`rate-limited`, `frame-too-large`,
 `session-degraded`, `room-closed`, `creation-disabled`.
 
 Additional codes used by the ClassRoom transport layer:
 `bad-message` (control frame that is not JSON or fails `isClientMsg`),
-`not-implemented-floor` (M0 scaffolding for floor paths not yet wired; no
-longer emitted for the floor messages in section 3 since T-007),
-`not-implemented-fanout` (binary frame before T-009 wires audio
-fan-out), `grant-absent` (teacher granted a pid that is neither waiting nor
-holding the floor; no state change). The `not-implemented-*` codes are M0
+`mute-absent` (teacher muted/unmuted a pid that is not a connected student; no
+state change), `not-implemented-fanout` (binary frame wired-off gate),
+`session-degraded`. The `not-implemented-*` codes are M0
 scaffolding: they exist so an unimplemented path
 reports itself instead of dropping input silently (NFR-001).
 
 ### 3.1 Caption semantics (emitted when the engine yields transcripts)
 
-- `text` is the **full current segment** so far for one turn of one kind, not
-  a delta: the client replaces its live segment on every
+- `text` is the **full current segment** so far for one turn of one kind for
+  one speaker, not a delta: the client replaces its live segment on every
   `caption{final:false}` and commits it to history on `caption{final:true}`.
 - `final:true` is emitted exactly once per turn (on the engine's turn-complete
   signal); every earlier emission for that turn carries `final:false`. An
   interrupted turn commits its partial segment as `final:true` rather than
   sending an empty final.
-- Routing is per translation pair, never broadcast: both `output` captions
+- The `speaker` field carries the pipe's source `participantIndex`; clients
+  use it to attribute turns and keep one live caption pair per speaker.
+- Routing is per translation pipe, never broadcast: both `output` captions
   (translated text) and `input` captions (source-speech transcription) go to
-  live sockets whose membership `lang` equals the pair's target language, and
-  to the pair's current source speaker. The speaker sees the original and
+  live sockets whose membership `lang` equals the pipe's target language, and
+  to the pipe's source speaker. The speaker sees the original and
   translated text of their own turn but never its translated audio (FR-015).
   Same-language listeners other than the speaker stay excluded — they receive
-  the un-relayed audio instead. With multiple target languages the speaker
-  receives one caption stream per pair (latest live value per kind wins;
-  each final is committed).
-- A listener belongs to exactly one pair at a time (their own language vs the
-  current speaker's), so each listener receives at most one input and one
-  output caption stream per turn. No caption data is persisted anywhere
-  (memory only, AGENTS.md rule 2).
-- `speaking-stop` flushes the provider input (`realtimeInput.audioStreamEnd`)
-  so speech captured before the button was released is translated. Floor
-  release never cancels in-flight translated audio; only a tab that loses the
-  floor to a new holder drops its own playback, and floor→`none` never
-  interrupts playback.
-- A `floor-changed` frame naming a new holder is a caption turn boundary: the
-  client commits its current live turn even if `final:true` never arrived
-  (defensive commit for engines that do not emit turn-complete), so the
-  previous speaker's text stays on screen when the next person talks. Going
-  idle (`floor.kind === "none"`) is not a boundary: the provider may still
-  stream the translated tail after `speaking-stop`, and committing there would
-  split one utterance into two turns. The UI keeps a chronological chat-style
-  transcript: committed turns persist and new turns append below them, instead
-  of a live slot overwriting the previous text.
+  the un-relayed audio instead.
+- **Parallel pipes**: several speakers may have their mic open at once, so a
+  listener can simultaneously receive one input+output pair per speaking
+  source. Caption slots are keyed by `speaker`, not globally: two concurrent
+  speakers each own their live slot and commit independently.
+- `mic-close` flushes the provider input (`realtimeInput.audioStreamEnd`)
+  so speech captured before the button was released is translated. Mic state
+  changes never cancel in-flight translated audio (the tail keeps flowing);
+  the client NEVER interrupts its own playback on mic or roster changes —
+  each pipe drains on the audio clock independently.
+- A `mic-changed` frame with `micOpen:false` for speaker S is a turn boundary
+  ONLY for S's caption slots: the client commits S's current live turn even if
+  `final:true` never arrived (defensive commit for engines that do not emit
+  turn-complete), so S's text stays on screen when someone else talks. Mic
+  OPEN, and `mic-changed` naming any other speaker, are not boundaries.
+  The UI keeps a chronological chat-style transcript: committed turns persist
+  and new turns append below them, instead of a live slot overwriting the
+  previous text.
 
 ## 3.2 Roster synchronisation
 
 `welcome` doubles as the roster-sync frame — there is no separate roster
 message. Sent once to a joining participant and again to every *other*
-connected client whenever the roster changes (join, leave). A client that
+connected client whenever the roster or force-mute state changes (join, leave,
+teacher mute/unmute). A client that
 already holds a `welcome` for its own `participantId` treats the frame as a
 roster update and re-renders from `roster`; a first frame is the join
 confirmation. `participantIndex` is stable for a participant and is never
 reused after they leave (0 = teacher, students take 1, 2, 3, …).
 
-A `hands` frame is sent alongside each `welcome`.
+`mic-changed` carries the light per-speaker updates (`mic-open`/`mic-close`
+acknowledgements and teacher-driven force-mute cuts) so live speaking state
+does not require a full roster re-render. A freshly admitted client receives
+`welcome` with the CURRENT `micOpen`/`forcedMuted` of every participant and
+therefore never needs to replay mic history. Decremented state (students who
+left while speaking, teacher replacing sockets) never leaks as stale
+`micOpen`.
 
 ## 3.3 Metrics cadence and semantics
 
@@ -172,8 +195,9 @@ The wire semantics in section 3.1 are normative; the client MUST:
 
 - replace the live text on `final:false` in place and commit the turn on
   `final:true` (keeping at most 50 committed turns in memory); a
-  `floor-changed` frame naming a new holder commits the live turn defensively
-  when `final:true` is absent, while floor→`none` does not;
+  `mic-changed` frame with `micOpen:false` for speaker S commits S's live turn
+  defensively when `final:true` is absent; mic-open and other speakers' mic
+  changes are never boundaries;
 - render a single chronological chat-style transcript in a scrollable area of
   capped height — committed turns persist, new turns append below, and long
   text wraps instead of being clamped, so it never pushes the controls

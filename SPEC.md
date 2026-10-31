@@ -12,6 +12,9 @@ bidirectional speech-to-speech translation**:
 - Teacher speaks (e.g. Arabic) → each student hears it in their own language.
 - A student speaks (e.g. English, French) → the teacher hears it in the
   teacher's language; classmates optionally hear it in their own languages.
+- Zoom/Meet mic control: the teacher may force-mute all or any student;
+  students unmute themselves; several people can talk at the same time —
+  each open mic is translated in its own independent pipe.
 
 The translation feature is built **first**, as a standalone testable
 "Translation Lab" (Milestone 0), before accounts, courses, payments, or
@@ -34,10 +37,11 @@ end to end as early as possible.
 2. As Marco, I join with room code + display name + role + language, so I can
    participate with zero setup.
 3. As Layla, I speak Arabic and Marco hears Spanish, so I can teach.
-4. As Marco, I raise my hand; Layla grants me the floor; I speak Spanish and
-   Layla hears Arabic, so I can ask questions.
-5. As Layla, I can revoke the floor at any time and my speech always takes
-   priority, so the class stays orderly.
+4. As Marco, I unmute and ask my question in Spanish whenever I want, even
+   while Layla is speaking, and Layla hears Arabic — unless she has muted me,
+   in which case my mic stays closed until she unmutes me.
+5. As Layla, I mute all students or any single student at any time, so the
+   class stays orderly; unmuting them never opens their mic for them.
 6. As Dev, I see a live metrics panel (latency, sessions, errors, DO active
    duration), so I can measure free-tier consumption from the first test.
 7. As Dev, I can run the whole flow with a fake translation provider, so I
@@ -67,29 +71,37 @@ end to end as early as possible.
 - **FR-007** Join with an unsupported language is rejected with
   `ERROR.unsupported-language`.
 
-### 4.2 Floor control (half duplex)
+### 4.2 Mic control (multi-speaker, Zoom/Meet model)
 
-- **FR-010** Only ONE person speaks at a time (half duplex). Rationale: mixing
-  several simultaneous speakers into one translation stream degrades output
-  quality and multiplies Gemini session cost; see `docs/FLOOR-CONTROL.md`.
-- **FR-011** Floor states: `IDLE`, `TEACHER_SPEAKING`, `STUDENT_SPEAKING(studentId)`.
-- **FR-012** A student may `raise-hand`; the teacher `grant`s or `deny`s.
-  Setting `autoGrant` (default off) grants automatically.
-- **FR-013** The teacher speaking always preempts: teacher audio/start takes
-  the floor immediately, revoking any student floor.
-- **FR-014** The teacher may `revoke` the floor at any time.
+- **FR-010** Any participant may open their mic at any time; multiple
+  participants may speak simultaneously. Each open mic is an independent
+  translation source. Rationale and rules: `docs/MIC-CONTROL.md`.
+- **FR-011** The teacher may force-mute all students or any single student,
+  and clear it. A force-muted student cannot open their mic
+  (`error{mic-forced-muted}`); unmuting (per pid or all) never opens a mic —
+  only the participant opens their own.
+- **FR-012** Mic state is server-authoritative: audio from a participant
+  whose mic is closed is dropped and counted as a violation
+  (`error{mic-closed}`); clients are hints only.
+- **FR-013** Force-muting an open mic cuts it immediately: provider input is
+  flushed (`audioStreamEnd`) so already-captured speech still translates as a
+  tail; listeners keep hearing the tail; nothing is cancelled mid-playback.
+- **FR-014** Mic state lives only in DO memory (never persisted); every join
+  or rejoin starts with the mic closed.
 - **FR-015** A speaker never receives the translated audio of their own
   speech (they do receive its captions, FR-034).
-- **FR-016** Every floor transition is broadcast to all room clients
-  (`floor-changed` event); full table and edge cases in
-  `docs/FLOOR-CONTROL.md`.
+- **FR-016** Every mic-state transition (`mic-changed`) and every roster or
+  force-mute change (re-broadcast `welcome`) is pushed to all room clients;
+  full table and edge cases in `docs/MIC-CONTROL.md`.
 
 ### 4.3 Translation routing
 
-- **FR-020** Translation sessions are keyed by
-  `(sourceLanguage → targetLanguage)`, pre-warmed at floor grant then
-  shared by all listeners needing that target language, reference-counted,
-  closed after an idle timeout (default 60 s, configurable).
+- **FR-020** Translation sessions are keyed per speaker pipe:
+  `(speaker → sourceLanguage → targetLanguage)` (one open mic = one
+  independent pipe per target language; two simultaneous speakers never share
+  a session). Each pipe is pre-warmed at `mic-open`, shared by all listeners
+  needing that target language, reference-counted, closed after an idle
+  timeout (default 60 s, configurable).
 - **FR-021** Same-language listener: relay the original audio untouched — no
   translation session, no Gemini cost.
 - **FR-022** Teacher speaks → one session per distinct student language.
@@ -139,15 +151,19 @@ end to end as early as possible.
   (never overwrite a committed turn with the next interim one). The UI renders
   a single chronological chat-style transcript — oldest committed turn first,
   the current live turn last — where old turns stay on screen and new turns
-  append below (chat/WhatsApp-style), including across speaker changes: a
-  `floor-changed` frame naming a new holder is a turn boundary that commits
-  the live turn defensively when `final:true` never arrived; going idle
-  (`floor.kind === "none"`) is not a boundary, because the provider may still
-  stream the translated tail after mic-off. Long text wraps
+   append below (chat/WhatsApp-style), including across speaker changes: a
+   `mic-changed{micOpen:false}` frame for speaker S is a turn boundary that
+   commits S's live turn defensively when `final:true` never arrived; S's
+   mic-open, and other speakers' mic changes, are not boundaries, because the
+   provider may still stream the translated tail after mic-close. Long text wraps
   (`whitespace-pre-wrap break-words`, no line clamping) and the transcript
   area itself scrolls at a capped height; auto-scroll follows new content only
   while the reader is already near the bottom. At most 50 committed turns are
-  kept in memory, oldest evicted first. Each turn is one bubble labelling
+  kept in memory, oldest evicted first. Caption slots are keyed by `speaker`
+  (a `mic-changed{micOpen:false}` frame for speaker S is a defensive commit
+  boundary ONLY for S's live turns; other speakers' mic changes and mic-open
+  frames never commit anyone's turn), because several speakers may caption
+  simultaneously. Each turn is one bubble labelling
   input vs translated text, uses `aria-live` for the live lines, and inherits
   the page `dir` so Arabic renders RTL. Captions are optional: an engine that
   yields none shows the documented empty state, never a spinner that implies
@@ -177,8 +193,10 @@ end to end as early as possible.
 
 - **FR-050** Signed join tokens (HMAC, short-lived), validated in the DO on
   upgrade; role in token is authoritative.
-- **FR-051** Only the teacher can grant/deny/revoke; students can send audio
-  only while holding the floor (DO drops + counts violations otherwise).
+- **FR-051** Only the teacher can force-mute or unmute (per student or all);
+  students send audio only while their mic is open on the live socket (DO
+  drops + counts violations otherwise), and a force-muted student cannot open
+  the mic.
 - **FR-052** Per-connection rate limiting (default: ≤ 20 audio frames/s,
   ≤ 10 control msg/s), max inbound frame 8 KiB, max participants enforced,
   max room duration (default 2 h), idle-room shutdown (default 15 min with no
@@ -194,7 +212,7 @@ end to end as early as possible.
   limits (`docs/LIMITS.md`); exceeding them fails gracefully, never silently.
 - **NFR-002** TypeScript strict mode everywhere; `TranslationProvider`
   interface isolates Gemini (swap to STT→MT→TTS or Fake without touching
-  room/floor/audio code).
+  room/mic/audio code).
 - **NFR-003** Tests use `FakeTranslationProvider` by default; real Gemini only
   in an opt-in manual smoke test.
 - **NFR-004** RTL-first UI; Arabic UI ships in M0 (i18n infra from day one).

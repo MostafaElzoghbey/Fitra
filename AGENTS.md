@@ -26,8 +26,10 @@ packages/shared/ (protocol codec + types) · docs/ · TASKS.md
    `SMOKE_GEMINI=1`, never in CI.
 4. **Read `docs/LIMITS.md` before touching audio paths.** 100 ms frames,
    minimal DO processing, outbound fan-out is free / inbound is 20:1.
-5. **Floor control is server-authoritative** (`docs/FLOOR-CONTROL.md`); clients
-   are hints only. Half duplex is a product rule, not a bug.
+5. **Mic control is server-authoritative** (`docs/MIC-CONTROL.md`); clients
+   are hints only. Zoom/Meet semantics: teacher force-mutes nobody/one/all,
+   students unmute themselves, multiple simultaneous speakers each get an
+   independent translation pipe.
 6. **Protocol changes update `docs/PROTOCOL.md` first**, then code, then tests.
 7. **Behaviour change → update the docs** (SPEC/ARCHITECTURE/LIMITS/
    OPEN-QUESTIONS) in the same task. Docs and code ship together.
