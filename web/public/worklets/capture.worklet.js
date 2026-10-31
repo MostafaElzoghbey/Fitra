@@ -82,7 +82,7 @@ class FitraCaptureProcessor extends AudioWorkletProcessor {
 
     this.port.onmessage = (event) => {
       if (event && event.data && event.data.type === "reset") {
-        // Floor revoke / reconnect: drop the partial frame, keep buffers.
+        // Mic close / reconnect: drop the partial frame, keep buffers.
         this.frameIndex = 0;
       }
     };

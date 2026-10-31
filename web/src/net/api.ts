@@ -7,7 +7,6 @@ import { errorMessageKey, type ParticipantLang, type UiStrings } from "../i18n.j
 export interface CreateRoomRequest {
   readonly teacherName: string;
   readonly teacherLang: ParticipantLang;
-  readonly autoGrant: boolean;
   readonly classmatesHearStudent: boolean;
   readonly consentConfirmed: boolean;
 }

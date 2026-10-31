@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { PlaybackScheduler } from "../src/audio/playback.js";
+import { FITRA_AUDIO_TYPE_DOWNLINK, FITRA_AUDIO_VERSION } from "@fitra/shared";
+import type { DecodedAudioFrame } from "@fitra/shared";
+
+import {
+  PlaybackScheduler,
+  SpeakerMixer,
+  createMixer,
+} from "../src/audio/playback.js";
 
 class FakeParam {
   value = 1;
@@ -67,6 +74,16 @@ function packet(seq: number): { seq: number; pcm24k: Uint8Array } {
   return { seq, pcm24k: new Uint8Array(4800) };
 }
 
+function frame(seq: number, speaker: number): DecodedAudioFrame {
+  return {
+    version: FITRA_AUDIO_VERSION,
+    type: FITRA_AUDIO_TYPE_DOWNLINK,
+    seq,
+    speaker,
+    payload: new Uint8Array(4800),
+  };
+}
+
 describe("PlaybackScheduler burst handling", () => {
   it("schedules a 3 s burst without dropping its tail", () => {
     const ctx = new FakeAudioContext();
@@ -79,19 +96,71 @@ describe("PlaybackScheduler burst handling", () => {
     expect(scheduler.stats.overruns).toBe(0);
     scheduler.dispose();
   });
+});
 
-  it("still resets its sequence cursor after an interrupt", () => {
+describe("SpeakerMixer per-speaker pipes (PROTOCOL §2)", () => {
+  it("demuxes frames by speaker into independent pipes with their own seq cursors", () => {
     const ctx = new FakeAudioContext();
-    const scheduler = new PlaybackScheduler(ctx as unknown as AudioContext);
-    for (let seq = 0; seq < 8; seq += 1) {
-      scheduler.pushPacket(packet(seq));
-    }
-    scheduler.interrupt();
-    for (let seq = 40; seq < 44; seq += 1) {
-      scheduler.pushPacket(packet(seq));
+    const mixer = new SpeakerMixer(ctx as unknown as AudioContext);
+    for (let seq = 0; seq < 6; seq += 1) {
+      mixer.demux(frame(seq, 0));
+      mixer.demux(frame(seq, 1));
     }
 
-    expect(scheduler.stats.framesPlayed).toBe(12);
-    scheduler.dispose();
+    const stats = mixer.stats;
+    expect(stats.framesPlayed).toBe(12);
+    expect(stats.gaps).toBe(0);
+    mixer.dispose();
+  });
+
+  it("a sequence gap PLC-fills only the gapped pipe; a late packet never touches the other pipe", () => {
+    const ctx = new FakeAudioContext();
+    const mixer = new SpeakerMixer(ctx as unknown as AudioContext);
+    for (let seq = 0; seq < 5; seq += 1) {
+      mixer.demux(frame(seq, 0));
+      mixer.demux(frame(seq, 1));
+    }
+    mixer.demux(frame(7, 0));
+    expect(mixer.stats.framesPlayed).toBe(13);
+    expect(mixer.stats.gaps).toBe(2);
+
+    mixer.demux(frame(5, 0));
+    expect(mixer.stats.framesPlayed).toBe(13);
+    expect(mixer.stats.gaps).toBe(2);
+
+    mixer.demux(frame(5, 1));
+    expect(mixer.stats.framesPlayed).toBe(14);
+    expect(mixer.stats.gaps).toBe(2);
+    mixer.dispose();
+  });
+
+  it("prune disposes schedulers whose speaker left the roster", () => {
+    const ctx = new FakeAudioContext();
+    const mixer = new SpeakerMixer(ctx as unknown as AudioContext);
+    for (let seq = 0; seq < 6; seq += 1) {
+      mixer.demux(frame(seq, 0));
+      mixer.demux(frame(seq, 1));
+    }
+    expect(mixer.stats.framesPlayed).toBe(12);
+
+    mixer.prune(new Set([1]));
+    expect(mixer.stats.framesPlayed).toBe(6);
+
+    mixer.demux(frame(6, 0));
+    mixer.demux(frame(6, 1));
+    expect(mixer.stats.framesPlayed).toBe(7);
+
+    mixer.dispose();
+    expect(mixer.stats.framesPlayed).toBe(0);
+  });
+
+  it("createMixer falls back to a counting NullMixer without an AudioContext", () => {
+    const mixer = createMixer();
+    mixer.demux(frame(0, 0));
+    mixer.demux(frame(1, 3));
+    expect(mixer.stats.framesPlayed).toBe(2);
+    expect(mixer.stats.gaps).toBe(0);
+    mixer.prune(new Set());
+    mixer.dispose();
   });
 });

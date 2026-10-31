@@ -1,6 +1,6 @@
 // T-013: room creation. Produces the shareable room code (SPEC FR-002) and
-// records the room config the teacher chose (FR-005 teacher language, FR-012
-// autoGrant, FR-023 classmatesHearStudent, PRIVACY rule 3 consent checkbox).
+// records the room config the teacher chose (FR-005 teacher language,
+// FR-023 classmatesHearStudent, PRIVACY rule 3 consent checkbox).
 
 import { useState } from "react";
 
@@ -22,7 +22,6 @@ export function Create(): React.JSX.Element {
 
   const [teacherName, setTeacherName] = useState("");
   const [teacherLang, setTeacherLang] = useState<ParticipantLang>("ar");
-  const [autoGrant, setAutoGrant] = useState(false);
   const [classmatesHearStudent, setClassmatesHearStudent] = useState(true);
   const [consentConfirmed, setConsentConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -44,7 +43,6 @@ export function Create(): React.JSX.Element {
     const result = await createRoom({
       teacherName: teacherName.trim(),
       teacherLang,
-      autoGrant,
       classmatesHearStudent,
       consentConfirmed,
     });
@@ -139,13 +137,6 @@ export function Create(): React.JSX.Element {
           </select>
         </div>
 
-        <ToggleRow
-          testId="toggle-auto-grant"
-          checked={autoGrant}
-          label={strings.toggleAutoGrantLabel}
-          help={strings.toggleAutoGrantHelp}
-          onChange={setAutoGrant}
-        />
         <ToggleRow
           testId="toggle-classmates"
           checked={classmatesHearStudent}

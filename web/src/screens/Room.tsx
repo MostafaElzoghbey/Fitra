@@ -1,15 +1,15 @@
 // T-013: in-room UI. Consumes validated `ServerMsg`s from net/socket.ts through
-// an exhaustive switch (docs/PROTOCOL.md section 3) and renders floor state,
-// roster and hand queue.
+// an exhaustive switch (docs/PROTOCOL.md section 3) and renders mic state,
+// roster and captions per docs/MIC-CONTROL.md.
 //
-// Deliberately no audio: T-010 (capture) and T-011 (playback) attach through the
-// `onMicToggle`/`onAudioFrame` seams. T-012 (metrics) injects its panel through
+// Room attaches its own audio: the mic gesture drives `RoomAudioHandle`
+// (capture/playback) directly; `onMicToggle` and `micError` stay optional
+// observer hooks for consumers. T-012 injects its metrics panel through
 // `renderMetrics` into `#metrics-mount`.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ClientMsg,
-  FloorHolder,
   RoomMetrics,
   RosterEntry,
   ServerMsg,
@@ -24,7 +24,7 @@ import {
   type UiStrings,
 } from "../i18n.js";
 import { useUiLang } from "../uiLang.js";
-import { FloorBar } from "../components/FloorBar.js";
+import { MicBar } from "../components/MicBar.js";
 import { Roster } from "../components/Roster.js";
 import { connectRoom, roomSocketUrl, type RoomSocket } from "../net/socket.js";
 import { rejoinRoom } from "../net/api.js";
@@ -32,7 +32,8 @@ import { attachRoomAudio, type RoomAudioHandle } from "../audio/roomShell.js";
 import { captureNoticeKey, type CaptureNotice } from "../audio/devices.js";
 import { navigate, type RoomRouteParams } from "../router.js";
 import {
-  commitTurnOnFloorChange,
+  commitSpeakerTurn,
+  commitTurnOnMicChange,
   emptyCaptions,
   reduceCaption,
   type CaptionTurn,
@@ -43,17 +44,15 @@ export interface RoomProps {
   readonly session: RoomRouteParams;
   /** T-012 injects the metrics panel here. */
   readonly renderMetrics?: (metrics: RoomMetrics | null) => React.ReactNode;
-  /** T-010/T-011 inject microphone control here. */
-  readonly onMicToggle?: (muted: boolean) => void;
-  /** T-011 reports a permission failure so the UI can show the blocking hint. */
+  /** Optional observer notification of the mic gesture. */
+  readonly onMicToggle?: (open: boolean) => void;
+  /** T-010 reports a permission failure so the UI can show the blocking hint. */
   readonly micError?: string | null;
 }
 
 interface RoomState {
   readonly selfId: string | null;
-  readonly floor: FloorHolder;
   readonly roster: readonly RosterEntry[];
-  readonly raised: readonly string[];
   readonly sessions: Readonly<Record<string, SessionStatus>>;
   readonly metrics: RoomMetrics | null;
   readonly captions: CaptionsState;
@@ -63,9 +62,7 @@ interface RoomState {
 
 const INITIAL_STATE: RoomState = {
   selfId: null,
-  floor: { kind: "none" },
   roster: [],
-  raised: [],
   sessions: {},
   metrics: null,
   captions: emptyCaptions(),
@@ -75,24 +72,54 @@ const INITIAL_STATE: RoomState = {
 
 function reduceServerMsg(state: RoomState, msg: ServerMsg): RoomState {
   switch (msg.t) {
-    case "welcome":
+    case "welcome": {
+      // A welcome is a full authoritative roster snapshot. Any caption slot
+      // whose participantIndex is no longer seated gets committed so a
+      // departed speaker's partial text stays visible and never bleeds into a
+      // later joiner (PROTOCOL §3.1 turn boundaries). Keyed by index, not a
+      // pid diff: indexes are never reused, so an absent index always means
+      // the speaker is gone.
+      const seated = new Set(msg.roster.map((e) => e.participantIndex));
+      let captions = state.captions;
+      for (const key of Object.keys(state.captions.slots)) {
+        const index = Number(key);
+        if (!seated.has(index)) {
+          captions = commitSpeakerTurn(captions, index);
+        }
+      }
+      // A fresh snapshot supersedes any stale in-room error banner (e.g. the
+      // forced-mute notice after the teacher unmuted everyone).
       return {
         ...state,
         selfId: msg.participantId,
-        floor: msg.floor,
         roster: msg.roster,
+        captions,
+        errorCode: null,
         connected: true,
       };
-    case "floor-changed": {
-      // A new holder is a speaker/turn boundary: commit the live caption turn
-      // defensively (final:true may never arrive), so the previous speaker's
-      // text stays on screen when the next person talks. Going idle is not a
-      // boundary: the translated tail may still be streaming after mic-off.
-      const captions = commitTurnOnFloorChange(state.captions, msg.floor);
-      return { ...state, captions, floor: msg.floor };
     }
-    case "hands":
-      return { ...state, raised: [...msg.raised] };
+    case "mic-changed": {
+      // Mic state lives in the roster snapshot; a mic-changed patches that one
+      // entry between snapshots. A close is a turn boundary ONLY for that
+      // speaker (PROTOCOL §3.1).
+      const roster = state.roster.map((entry) =>
+        entry.participantId === msg.participantId
+          ? { ...entry, micOpen: msg.micOpen }
+          : entry,
+      );
+      const speaker = state.roster.find(
+        (entry) => entry.participantId === msg.participantId,
+      );
+      const captions =
+        speaker === undefined
+          ? state.captions
+          : commitTurnOnMicChange(
+              state.captions,
+              speaker.participantIndex,
+              msg.micOpen,
+            );
+      return { ...state, roster, captions };
+    }
     case "session-status":
       return {
         ...state,
@@ -103,7 +130,9 @@ function reduceServerMsg(state: RoomState, msg: ServerMsg): RoomState {
     case "metrics":
       return { ...state, metrics: msg.m };
     case "error":
-      return { ...state, errorCode: msg.code, connected: false };
+      // In-room errors do not drop the connection (only onClose does); the
+      // banner stays until the next welcome snapshot.
+      return { ...state, errorCode: msg.code };
     case "pong":
       return state;
     default:
@@ -120,7 +149,6 @@ export function Room({
   const { lang } = useUiLang();
   const strings = getStrings(lang);
   const [state, setState] = useState<RoomState>(INITIAL_STATE);
-  const [micMuted, setMicMuted] = useState(true);
   const [micNotice, setMicNotice] = useState<CaptureNotice | null>(null);
   const [token, setToken] = useState(session.token);
   const socketRef = useRef<RoomSocket | null>(null);
@@ -132,9 +160,9 @@ export function Room({
 
   // PROTOCOL.md section 1 rejoin: an abnormal socket drop replays the original
   // token to POST /rooms/:code/rejoin (expiry waived, same pid re-minted) and
-  // reconnects with the fresh token, so membership and floor state survive.
+  // reconnects with the fresh token, so membership and mic state survive.
   // Only terminal join-rejection codes stop auto-rejoin for good; routine
-  // in-room errors (rate-limited, not-your-floor, session-degraded) must not
+  // in-room errors (rate-limited, mic-*, mute-*, session-degraded) must not
   // poison recovery from a later genuine network drop.
   const terminalErrorCodes: ReadonlySet<string> = new Set([
     "room-closed",
@@ -192,6 +220,11 @@ export function Room({
           lastErrorRef.current = msg.code;
         }
         rejoiningRef.current = false;
+        if (msg.code === "mic-forced-muted") {
+          // Server-authoritative cut while we believed the mic open: stop the
+          // capture and let the roster snapshot sync the UI (MIC-CONTROL.md).
+          audioRef.current?.closeMic();
+        }
       }
       setState((previous) => reduceServerMsg(previous, msg));
     });
@@ -216,17 +249,21 @@ export function Room({
     socketRef.current?.send(msg);
   }, []);
 
-  const toggleMic = useCallback(() => {
-    const next = !micMuted;
-    setMicMuted(next);
-    audioRef.current?.setMuted(next);
-    onMicToggle?.(next);
-  }, [micMuted, onMicToggle]);
-
-  const handRaised = useMemo(
-    () => state.selfId !== null && state.raised.includes(state.selfId),
-    [state.raised, state.selfId],
+  const self = useMemo(
+    () =>
+      state.selfId === null
+        ? undefined
+        : state.roster.find((e) => e.participantId === state.selfId),
+    [state.roster, state.selfId],
   );
+  const selfMicOpen = self?.micOpen ?? false;
+
+  const toggleMic = useCallback(() => {
+    const open = !selfMicOpen;
+    if (open) audioRef.current?.openMic();
+    else audioRef.current?.closeMic();
+    onMicToggle?.(open);
+  }, [selfMicOpen, onMicToggle]);
 
   return (
     <main className="ui-page">
@@ -254,20 +291,15 @@ export function Room({
 
       <div className="grid gap-6 lg:grid-cols-3">
         <div className="space-y-6 lg:col-span-2">
-          <FloorBar
+          <MicBar
             strings={strings}
             roster={state.roster}
-            floor={state.floor}
             role={session.role}
             selfId={state.selfId}
-            handRaised={handRaised}
-            handsUpCount={state.raised.length}
-            micMuted={micMuted}
-            onRaiseHand={() => send({ t: "raise-hand" })}
-            onLowerHand={() => send({ t: "lower-hand" })}
-            onRevoke={() => send({ t: "revoke" })}
-            onToggleMic={toggleMic}
             micHint={micError ?? (micNotice === null ? null : strings[captureNoticeKey(micNotice)])}
+            onToggleMic={toggleMic}
+            onMuteAll={() => send({ t: "mute-all" })}
+            onUnmuteAll={() => send({ t: "unmute-all" })}
           />
 
           <p className="ui-banner-info" data-testid="headphones-hint">
@@ -297,7 +329,11 @@ export function Room({
             </p>
           )}
 
-          <CaptionPanel strings={strings} captions={state.captions} />
+          <CaptionPanel
+            strings={strings}
+            roster={state.roster}
+            captions={state.captions}
+          />
 
           <SessionPanel strings={strings} sessions={state.sessions} />
         </div>
@@ -306,12 +342,10 @@ export function Room({
           <Roster
             strings={strings}
             roster={state.roster}
-            raised={state.raised}
-            floor={state.floor}
             role={session.role}
             selfId={state.selfId}
-            onGrant={(participantId) => send({ t: "grant", participantId })}
-            onDeny={(participantId) => send({ t: "deny", participantId })}
+            onMute={(participantId) => send({ t: "mute", participantId })}
+            onUnmute={(participantId) => send({ t: "unmute", participantId })}
           />
           <section
             id="metrics-mount"
@@ -331,18 +365,21 @@ export function Room({
   );
 }
 
-/** One committed turn of the chat transcript: source line + translation line. */
+/** One committed turn: who spoke, the source line, the translation. */
 function TurnBubble({
   strings,
   turn,
   index,
+  speakerLabel,
 }: {
   readonly strings: UiStrings;
   readonly turn: CaptionTurn;
   readonly index: number;
+  readonly speakerLabel: string;
 }): React.JSX.Element {
   return (
     <div className="space-y-1 rounded-lg bg-paper-sunk p-3" data-testid={`caption-history-${index}`}>
+      <p className="text-xs font-semibold text-ink-400">{speakerLabel}</p>
       {turn.input !== "" && (
         <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-ink-600">
           <span className="me-2 text-xs font-semibold text-ink-400">
@@ -365,12 +402,14 @@ function TurnBubble({
 
 function CaptionPanel({
   strings,
+  roster,
   captions,
 }: {
   readonly strings: UiStrings;
+  readonly roster: readonly RosterEntry[];
   readonly captions: CaptionsState;
 }): React.JSX.Element {
-  const { live, history } = captions;
+  const { slots, lastSpeaker, history } = captions;
   const scrollRef = useRef<HTMLDivElement | null>(null);
   // Chat transcript follows new content only while the reader is already near
   // the bottom; scrolling up to read long text must not be yanked back down.
@@ -388,8 +427,22 @@ function CaptionPanel({
     el.scrollTop = el.scrollHeight;
   }, [captions]);
 
-  const empty = live.input === "" && live.output === "" && history.length === 0;
-  const liveOpen = live.input !== "" || live.output !== "";
+  const speakerLabel = (index: number): string =>
+    roster.find((e) => e.participantIndex === index)?.name ??
+    strings.captionsSpeakerFallback;
+
+  // Text-less slots (a stray empty interim) render nothing and count as empty.
+  const visibleKeys = Object.keys(slots).filter((key) => {
+    const live = slots[key];
+    return live !== undefined && (live.input !== "" || live.output !== "");
+  });
+  // The canonical live bubble (the one carrying the E2E testids) belongs to the
+  // most recent speaker; when their slot is gone it falls to the next live one.
+  const canonicalKey =
+    lastSpeaker !== null && visibleKeys.includes(String(lastSpeaker))
+      ? String(lastSpeaker)
+      : visibleKeys[0] ?? null;
+  const empty = visibleKeys.length === 0 && history.length === 0;
   return (
     <section className="ui-card p-4" aria-label={strings.captionsTitle}>
       <h2 className="ui-section-title">{strings.captionsTitle}</h2>
@@ -407,36 +460,54 @@ function CaptionPanel({
           {history.length > 0 && (
             <div className="space-y-3" data-testid="caption-history">
               {history.map((turn, index) => (
-                <TurnBubble key={index} strings={strings} turn={turn} index={index} />
+                <TurnBubble
+                  key={index}
+                  strings={strings}
+                  turn={turn}
+                  index={index}
+                  speakerLabel={speakerLabel(turn.speaker)}
+                />
               ))}
             </div>
           )}
-          {liveOpen && (
-            <div className="space-y-1 rounded-lg bg-brand-50 p-3">
-              {live.input !== "" && (
-                <p
-                  className="whitespace-pre-wrap break-words text-sm leading-relaxed text-ink-600"
-                  data-testid="caption-live-input"
-                  aria-live="polite"
-                >
-                  <span className="me-2 text-xs font-semibold text-ink-500">
-                    {strings.captionsInputLabel}
-                  </span>
-                  {live.input}
-                </p>
-              )}
-              {live.output !== "" && (
-                <p
-                  className="whitespace-pre-wrap break-words text-sm leading-relaxed text-ink-800"
-                  data-testid="caption-live-output"
-                  aria-live="polite"
-                >
-                  <span className="me-2 text-xs font-semibold text-ink-500">
-                    {strings.captionsOutputLabel}
-                  </span>
-                  {live.output}
-                </p>
-              )}
+          {visibleKeys.length > 0 && (
+            <div className="space-y-3">
+              {visibleKeys.map((key) => {
+                const live = slots[key];
+                if (live === undefined) return null;
+                const canonical = key === canonicalKey;
+                return (
+                  <div key={key} className="space-y-1 rounded-lg bg-brand-50 p-3">
+                    <p className="text-xs font-semibold text-ink-500">
+                      {speakerLabel(Number(key))}
+                    </p>
+                    {live.input !== "" && (
+                      <p
+                        className="whitespace-pre-wrap break-words text-sm leading-relaxed text-ink-600"
+                        data-testid={canonical ? "caption-live-input" : undefined}
+                        aria-live="polite"
+                      >
+                        <span className="me-2 text-xs font-semibold text-ink-500">
+                          {strings.captionsInputLabel}
+                        </span>
+                        {live.input}
+                      </p>
+                    )}
+                    {live.output !== "" && (
+                      <p
+                        className="whitespace-pre-wrap break-words text-sm leading-relaxed text-ink-800"
+                        data-testid={canonical ? "caption-live-output" : undefined}
+                        aria-live="polite"
+                      >
+                        <span className="me-2 text-xs font-semibold text-ink-500">
+                          {strings.captionsOutputLabel}
+                        </span>
+                        {live.output}
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>

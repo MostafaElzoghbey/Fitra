@@ -69,7 +69,10 @@ export type ErrorCode =
   | "teacher-taken"
   | "room-full"
   | "unsupported-language"
-  | "not-your-floor"
+  | "mic-forced-muted"
+  | "mic-closed"
+  | "mute-absent"
+  | "bad-message"
   | "rate-limited"
   | "frame-too-large"
   | "session-degraded"
@@ -109,8 +112,8 @@ export interface UiStrings {
   readonly homeStep1Body: string;
   readonly homeStep2Title: string;
   readonly homeStep2Body: string;
-  readonly homeFloorTitle: string;
-  readonly homeFloorBody: string;
+  readonly homeMicTitle: string;
+  readonly homeMicBody: string;
 
   readonly createTitle: string;
   readonly createLead: string;
@@ -134,8 +137,6 @@ export interface UiStrings {
   readonly fieldRoleLabel: string;
   readonly fieldLangLabel: string;
 
-  readonly toggleAutoGrantLabel: string;
-  readonly toggleAutoGrantHelp: string;
   readonly toggleClassmatesLabel: string;
   readonly toggleClassmatesHelp: string;
   readonly consentConfirmLabel: string;
@@ -163,21 +164,13 @@ export interface UiStrings {
 
   readonly roomTitle: string;
   readonly roomLeave: string;
-  readonly floorIdle: string;
-  readonly floorTeacher: string;
-  readonly floorStudent: string;
-  readonly floorYours: string;
-  readonly floorNone: string;
-  readonly floorWaiting: string;
-  readonly raiseHand: string;
-  readonly lowerHand: string;
-  readonly handRaisedBadge: string;
-  readonly handsSummaryNone: string;
-  readonly handsSummaryOne: string;
-  readonly handsSummaryMany: string;
-  readonly revokeFloor: string;
-  readonly grantFloor: string;
-  readonly denyRequest: string;
+  readonly micBannerIdle: string;
+  readonly micBannerSpeaking: string;
+  readonly muteAllLabel: string;
+  readonly unmuteAllLabel: string;
+  readonly muteLabel: string;
+  readonly unmuteLabel: string;
+  readonly forcedMutedNotice: string;
   readonly rosterTitle: string;
   readonly rosterEmpty: string;
   readonly rosterYou: string;
@@ -194,6 +187,7 @@ export interface UiStrings {
   readonly captionsEmpty: string;
   readonly captionsInputLabel: string;
   readonly captionsOutputLabel: string;
+  readonly captionsSpeakerFallback: string;
   readonly sessionsTitle: string;
   readonly sessionsEmpty: string;
   readonly statusConnecting: string;
@@ -235,7 +229,10 @@ export interface UiStrings {
   readonly errTeacherTaken: string;
   readonly errRoomFull: string;
   readonly errUnauthorized: string;
-  readonly errNotYourFloor: string;
+  readonly errMicForcedMuted: string;
+  readonly errMicClosed: string;
+  readonly errMuteAbsent: string;
+  readonly errBadMessage: string;
   readonly errRateLimited: string;
   readonly errFrameTooLarge: string;
   readonly errSessionDegraded: string;
@@ -270,9 +267,9 @@ const STRINGS: Record<SupportedUiLang, UiStrings> = {
     homeStep2Title: "٢ — الطالب ينضم بالرمز",
     homeStep2Body:
       "يكتب الرمز واسمه ولغته، ويوافق على إشعار الموافقة قبل تشغيل الميكروفون.",
-    homeFloorTitle: "قاعدة الصف",
-    homeFloorBody:
-      "متحدّث واحد فقط في كل لحظة. يرفع الطالب يده، فيمنح المعلّم الأرضية أو يرفضها، ويمكنه سحبها في أي وقت.",
+    homeMicTitle: "قاعدة الميكروفون",
+    homeMicBody:
+      "يستطيع المعلّم كتم الطلبة جميعًا أو بعضهم، وكل طالب يفتح ميكروفونه بنفسه ما لم يُكتم إجباريًا، ويمكن أن يتحدّث عدة أشخاص في الوقت نفسه.",
 
     createTitle: "إنشاء صف",
     createLead: "اضبط إعدادات الصف، وستحصل على رمز تشاركه مع الطلبة.",
@@ -298,9 +295,6 @@ const STRINGS: Record<SupportedUiLang, UiStrings> = {
     fieldRoleLabel: "الدور",
     fieldLangLabel: "لغتي (استماع + كلام)",
 
-    toggleAutoGrantLabel: "منح الأرضية تلقائيًا",
-    toggleAutoGrantHelp:
-      "معطّل افتراضيًا. عند تفعيله يُمنح الطالب الأرضية فور رفع يده.",
     toggleClassmatesLabel: "يسمع الطلبةُ بعضهم",
     toggleClassmatesHelp:
       "مفعّل افتراضيًا. عند إيقافه يسمع الطالب الوحيد المعلّم ولا يسمعه زملاؤه.",
@@ -337,21 +331,13 @@ const STRINGS: Record<SupportedUiLang, UiStrings> = {
 
     roomTitle: "الصف",
     roomLeave: "مغادرة الصف",
-    floorIdle: "الصف صامت الآن",
-    floorTeacher: "المعلّم يتحدّث",
-    floorStudent: "{name} يتحدّث",
-    floorYours: "الأرضية بيدك",
-    floorNone: "لا أحد يتحدّث",
-    floorWaiting: "بانتظار متحدّث",
-    raiseHand: "ارفع اليد",
-    lowerHand: "اخفض اليد",
-    handRaisedBadge: "اليد مرفوعة",
-    handsSummaryNone: "لا توجد أيدٍ مرفوعة",
-    handsSummaryOne: "يد واحدة مرفوعة",
-    handsSummaryMany: "{count} أيدٍ مرفوعة",
-    revokeFloor: "سحب الأرضية",
-    grantFloor: "منح الأرضية",
-    denyRequest: "رفض الطلب",
+    micBannerIdle: "الصف صامت الآن",
+    micBannerSpeaking: "يتحدّث الآن: {names}",
+    muteAllLabel: "كتم الجميع",
+    unmuteAllLabel: "إلغاء الكتم عن الجميع",
+    muteLabel: "كتم",
+    unmuteLabel: "إلغاء الكتم",
+    forcedMutedNotice: "كتم المعلّم ميكروفونك",
     rosterTitle: "الحضور",
     rosterEmpty: "لا أحد بعد.",
     rosterYou: "أنت",
@@ -359,7 +345,7 @@ const STRINGS: Record<SupportedUiLang, UiStrings> = {
     micOn: "الميكروفون يعمل",
     micOff: "الميكروفون مكتوم",
     micHint:
-      "اضغط لاختبار الميكروفون. تشغيل الصوت يتطلّب نقرة صريحة منك.",
+      "اضغط لفتح الميكروفون أو إغلاقه. تشغيل الصوت يتطلّب نقرة صريحة منك.",
     micDeniedHint:
       "رُفض إذن الميكروفون. فعّله من إعدادات المتصفح ثم أعد المحاولة.",
     micDeviceLostHint:
@@ -373,6 +359,7 @@ const STRINGS: Record<SupportedUiLang, UiStrings> = {
     captionsEmpty: "لا تتوفّر ترجمة نصية في هذا المحرك بعد.",
     captionsInputLabel: "كلام المتحدّث",
     captionsOutputLabel: "الترجمة",
+    captionsSpeakerFallback: "متحدّث",
     sessionsTitle: "جلسات الترجمة",
     sessionsEmpty: "لا توجد جلسات بعد.",
     statusConnecting: "جارٍ الاتصال",
@@ -414,7 +401,10 @@ const STRINGS: Record<SupportedUiLang, UiStrings> = {
     errTeacherTaken: "يوجد معلّم في هذا الصف بالفعل.",
     errRoomFull: "الصف ممتلئ.",
     errUnauthorized: "انتهت صلاحية رمز الدخول أو أنه غير صالح.",
-    errNotYourFloor: "الأرضية ليست بيدك.",
+    errMicForcedMuted: "كتم المعلّم ميكروفونك، فلا يمكن فتحه الآن.",
+    errMicClosed: "افتح ميكروفونك قبل الحديث.",
+    errMuteAbsent: "المشارك المطلوب غير موجود.",
+    errBadMessage: "رسالة غير صالحة.",
     errRateLimited: "عدد الرسائل كبير جدًا، أبطئ قليلًا.",
     errFrameTooLarge: "إطار صوتي كبير جدًا.",
     errSessionDegraded: "تم تجاوز حد جلسات الترجمة، فبعض اللغات بلا صوت.",
@@ -448,9 +438,9 @@ const STRINGS: Record<SupportedUiLang, UiStrings> = {
     homeStep2Title: "2 — Students join with the code",
     homeStep2Body:
       "They enter the code, a display name and their language, and accept the privacy notice before the microphone turns on.",
-    homeFloorTitle: "Floor rule",
-    homeFloorBody:
-      "Only one person speaks at a time. A student raises a hand; the teacher grants or denies it, and can revoke the floor at any time.",
+    homeMicTitle: "Mic rule",
+    homeMicBody:
+      "The teacher can mute everyone or one student; every student opens their own microphone unless it is force-muted, and several people can speak at once.",
 
     createTitle: "Create a room",
     createLead: "Set the room options, then share the code with your students.",
@@ -477,9 +467,6 @@ const STRINGS: Record<SupportedUiLang, UiStrings> = {
     fieldRoleLabel: "Role",
     fieldLangLabel: "My language (listen + speak)",
 
-    toggleAutoGrantLabel: "Auto-grant the floor",
-    toggleAutoGrantHelp:
-      "Off by default. When on, a raised hand is granted immediately.",
     toggleClassmatesLabel: "Students hear each other",
     toggleClassmatesHelp:
       "On by default. When off, only the teacher hears a speaking student.",
@@ -515,21 +502,13 @@ const STRINGS: Record<SupportedUiLang, UiStrings> = {
 
     roomTitle: "Room",
     roomLeave: "Leave the room",
-    floorIdle: "The room is quiet",
-    floorTeacher: "The teacher is speaking",
-    floorStudent: "{name} is speaking",
-    floorYours: "You hold the floor",
-    floorNone: "Nobody is speaking",
-    floorWaiting: "Waiting for a speaker",
-    raiseHand: "Raise hand",
-    lowerHand: "Lower hand",
-    handRaisedBadge: "Hand raised",
-    handsSummaryNone: "No raised hands",
-    handsSummaryOne: "One hand raised",
-    handsSummaryMany: "{count} hands raised",
-    revokeFloor: "Revoke floor",
-    grantFloor: "Grant floor",
-    denyRequest: "Deny",
+    micBannerIdle: "The room is quiet",
+    micBannerSpeaking: "Speaking now: {names}",
+    muteAllLabel: "Mute all",
+    unmuteAllLabel: "Unmute all",
+    muteLabel: "Mute",
+    unmuteLabel: "Unmute",
+    forcedMutedNotice: "The teacher muted your microphone",
     rosterTitle: "Participants",
     rosterEmpty: "Nobody here yet.",
     rosterYou: "You",
@@ -537,7 +516,7 @@ const STRINGS: Record<SupportedUiLang, UiStrings> = {
     micOn: "Microphone on",
     micOff: "Microphone muted",
     micHint:
-      "Tap to test the microphone. Audio only starts after an explicit click from you.",
+      "Tap to open or close your microphone. Audio only starts after an explicit click from you.",
     micDeniedHint:
       "Microphone permission was denied. Enable it in your browser settings and try again.",
     micDeviceLostHint:
@@ -552,6 +531,7 @@ const STRINGS: Record<SupportedUiLang, UiStrings> = {
     captionsEmpty: "This engine does not provide transcripts yet.",
     captionsInputLabel: "Speaker",
     captionsOutputLabel: "Translated",
+    captionsSpeakerFallback: "Speaker",
     sessionsTitle: "Translation sessions",
     sessionsEmpty: "No sessions yet.",
     statusConnecting: "Connecting",
@@ -593,7 +573,11 @@ const STRINGS: Record<SupportedUiLang, UiStrings> = {
     errTeacherTaken: "This room already has a teacher.",
     errRoomFull: "This room is full.",
     errUnauthorized: "The join token expired or is not valid.",
-    errNotYourFloor: "You do not hold the floor.",
+    errMicForcedMuted:
+      "The teacher muted your microphone, so it cannot be opened now.",
+    errMicClosed: "Your microphone is closed; open it before speaking.",
+    errMuteAbsent: "That participant is not in the room.",
+    errBadMessage: "Invalid message.",
     errRateLimited: "Too many messages, slow down a little.",
     errFrameTooLarge: "Audio frame too large.",
     errSessionDegraded:
@@ -628,9 +612,9 @@ const STRINGS: Record<SupportedUiLang, UiStrings> = {
     homeStep2Title: "2 — Les élèves rejoignent avec le code",
     homeStep2Body:
       "Ils saisissent le code, un nom affiché et leur langue, puis acceptent l’avis de confidentialité avant l’activation du micro.",
-    homeFloorTitle: "Règle de la parole",
-    homeFloorBody:
-      "Une seule personne parle à la fois. L’élève lève la main, l’enseignant accorde ou refuse, et peut retirer la parole à tout moment.",
+    homeMicTitle: "Règle du micro",
+    homeMicBody:
+      "L’enseignant peut couper le micro de tous les élèves ou d’un seul ; chaque élève active son propre micro sauf s’il est coupé d’office, et plusieurs personnes peuvent parler en même temps.",
 
     createTitle: "Créer un salon",
     createLead: "Réglez les options, puis partagez le code avec vos élèves.",
@@ -657,9 +641,6 @@ const STRINGS: Record<SupportedUiLang, UiStrings> = {
     fieldRoleLabel: "Rôle",
     fieldLangLabel: "Ma langue (écoute + parole)",
 
-    toggleAutoGrantLabel: "Accorder la parole automatiquement",
-    toggleAutoGrantHelp:
-      "Désactivé par défaut. Activé, une main levée est accordée immédiatement.",
     toggleClassmatesLabel: "Les élèves s’entendent entre eux",
     toggleClassmatesHelp:
       "Activé par défaut. Désactivé, seul l’enseignant entend l’élève qui parle.",
@@ -695,21 +676,13 @@ const STRINGS: Record<SupportedUiLang, UiStrings> = {
 
     roomTitle: "Salon",
     roomLeave: "Quitter le salon",
-    floorIdle: "Le salon est silencieux",
-    floorTeacher: "L’enseignant parle",
-    floorStudent: "{name} parle",
-    floorYours: "Vous avez la parole",
-    floorNone: "Personne ne parle",
-    floorWaiting: "En attente d’un orateur",
-    raiseHand: "Lever la main",
-    lowerHand: "Baisser la main",
-    handRaisedBadge: "Main levée",
-    handsSummaryNone: "Aucune main levée",
-    handsSummaryOne: "Une main levée",
-    handsSummaryMany: "{count} mains levées",
-    revokeFloor: "Retirer la parole",
-    grantFloor: "Accorder la parole",
-    denyRequest: "Refuser",
+    micBannerIdle: "Le salon est silencieux",
+    micBannerSpeaking: "Parle maintenant : {names}",
+    muteAllLabel: "Couper tous les micros",
+    unmuteAllLabel: "Réactiver tous les micros",
+    muteLabel: "Couper le micro",
+    unmuteLabel: "Réactiver le micro",
+    forcedMutedNotice: "L’enseignant a coupé votre micro",
     rosterTitle: "Participants",
     rosterEmpty: "Personne pour l’instant.",
     rosterYou: "Vous",
@@ -717,7 +690,7 @@ const STRINGS: Record<SupportedUiLang, UiStrings> = {
     micOn: "Microphone activé",
     micOff: "Microphone coupé",
     micHint:
-      "Touchez pour tester le micro. Le son ne démarre qu’après un clic explicite de votre part.",
+      "Touchez pour ouvrir ou couper votre micro. Le son ne démarre qu’après un clic explicite de votre part.",
     micDeniedHint:
       "L’autorisation du micro a été refusée. Activez-la dans votre navigateur puis réessayez.",
     micDeviceLostHint:
@@ -732,6 +705,7 @@ const STRINGS: Record<SupportedUiLang, UiStrings> = {
     captionsEmpty: "Ce moteur ne fournit pas encore de transcription.",
     captionsInputLabel: "Orateur",
     captionsOutputLabel: "Traduction",
+    captionsSpeakerFallback: "Orateur",
     sessionsTitle: "Sessions de traduction",
     sessionsEmpty: "Aucune session pour l’instant.",
     statusConnecting: "Connexion",
@@ -773,7 +747,11 @@ const STRINGS: Record<SupportedUiLang, UiStrings> = {
     errTeacherTaken: "Ce salon a déjà un enseignant.",
     errRoomFull: "Ce salon est complet.",
     errUnauthorized: "Le jeton d’accès a expiré ou n’est pas valide.",
-    errNotYourFloor: "Vous n’avez pas la parole.",
+    errMicForcedMuted:
+      "L’enseignant a coupé votre micro ; il ne peut pas être activé pour le moment.",
+    errMicClosed: "Votre micro est coupé ; activez-le avant de parler.",
+    errMuteAbsent: "Ce participant n’est pas dans le salon.",
+    errBadMessage: "Message invalide.",
     errRateLimited: "Trop de messages, ralentissez un peu.",
     errFrameTooLarge: "Trame audio trop volumineuse.",
     errSessionDegraded:
@@ -808,9 +786,9 @@ const STRINGS: Record<SupportedUiLang, UiStrings> = {
     homeStep2Title: "2 — El alumnado se une con el código",
     homeStep2Body:
       "Escriben el código, un nombre visible y su idioma, y aceptan el aviso de privacidad antes de activar el micrófono.",
-    homeFloorTitle: "Regla de turnos",
-    homeFloorBody:
-      "Solo una persona habla a la vez. El alumno levanta la mano, el docente concede o deniega, y puede retirar el turno en cualquier momento.",
+    homeMicTitle: "Regla del micrófono",
+    homeMicBody:
+      "El docente puede silenciar a todos o a un alumno; cada alumno activa su propio micrófono salvo silencio forzado, y varias personas pueden hablar a la vez.",
 
     createTitle: "Crear una sala",
     createLead: "Ajusta las opciones y comparte el código con tu alumnado.",
@@ -837,9 +815,6 @@ const STRINGS: Record<SupportedUiLang, UiStrings> = {
     fieldRoleLabel: "Rol",
     fieldLangLabel: "Mi idioma (escuchar + hablar)",
 
-    toggleAutoGrantLabel: "Conceder el turno automáticamente",
-    toggleAutoGrantHelp:
-      "Desactivado por defecto. Activado, una mano levantada se concede al instante.",
     toggleClassmatesLabel: "El alumnado se escucha entre sí",
     toggleClassmatesHelp:
       "Activado por defecto. Desactivado, solo el docente oye al alumno que habla.",
@@ -875,21 +850,13 @@ const STRINGS: Record<SupportedUiLang, UiStrings> = {
 
     roomTitle: "Sala",
     roomLeave: "Salir de la sala",
-    floorIdle: "La sala está en silencio",
-    floorTeacher: "El docente está hablando",
-    floorStudent: "{name} está hablando",
-    floorYours: "Tienes el turno",
-    floorNone: "Nadie está hablando",
-    floorWaiting: "Esperando a quien hable",
-    raiseHand: "Levantar la mano",
-    lowerHand: "Bajar la mano",
-    handRaisedBadge: "Mano levantada",
-    handsSummaryNone: "Ninguna mano levantada",
-    handsSummaryOne: "Una mano levantada",
-    handsSummaryMany: "{count} manos levantadas",
-    revokeFloor: "Retirar el turno",
-    grantFloor: "Conceder el turno",
-    denyRequest: "Denegar",
+    micBannerIdle: "La sala está en silencio",
+    micBannerSpeaking: "Está hablando: {names}",
+    muteAllLabel: "Silenciar a todos",
+    unmuteAllLabel: "Activar a todos",
+    muteLabel: "Silenciar",
+    unmuteLabel: "Activar",
+    forcedMutedNotice: "El docente silenció tu micrófono",
     rosterTitle: "Participantes",
     rosterEmpty: "Todavía no hay nadie.",
     rosterYou: "Tú",
@@ -897,7 +864,7 @@ const STRINGS: Record<SupportedUiLang, UiStrings> = {
     micOn: "Micrófono activo",
     micOff: "Micrófono silenciado",
     micHint:
-      "Toca para probar el micrófono. El sonido solo arranca tras un clic explícito tuyo.",
+      "Toca para abrir o silenciar tu micrófono. El sonido solo arranca tras un clic explícito tuyo.",
     micDeniedHint:
       "Se denegó el permiso del micrófono. Actívalo en el navegador y vuelve a intentarlo.",
     micDeviceLostHint:
@@ -912,6 +879,7 @@ const STRINGS: Record<SupportedUiLang, UiStrings> = {
     captionsEmpty: "Este motor todavía no ofrece transcripción.",
     captionsInputLabel: "Ponente",
     captionsOutputLabel: "Traducción",
+    captionsSpeakerFallback: "Ponente",
     sessionsTitle: "Sesiones de traducción",
     sessionsEmpty: "Aún no hay sesiones.",
     statusConnecting: "Conectando",
@@ -953,7 +921,11 @@ const STRINGS: Record<SupportedUiLang, UiStrings> = {
     errTeacherTaken: "Esta sala ya tiene un docente.",
     errRoomFull: "Esta sala está llena.",
     errUnauthorized: "El token de acceso caducó o no es válido.",
-    errNotYourFloor: "No tienes el turno.",
+    errMicForcedMuted:
+      "El docente silenció tu micrófono; no se puede activar ahora.",
+    errMicClosed: "Tu micrófono está cerrado; actívalo antes de hablar.",
+    errMuteAbsent: "Ese participante no está en la sala.",
+    errBadMessage: "Mensaje no válido.",
     errRateLimited: "Demasiados mensajes, baja un poco el ritmo.",
     errFrameTooLarge: "Trama de audio demasiado grande.",
     errSessionDegraded:
@@ -980,7 +952,10 @@ const ERROR_KEYS: Record<ErrorCode, keyof UiStrings> = {
   "teacher-taken": "errTeacherTaken",
   "room-full": "errRoomFull",
   "unsupported-language": "errUnsupportedLanguage",
-  "not-your-floor": "errNotYourFloor",
+  "mic-forced-muted": "errMicForcedMuted",
+  "mic-closed": "errMicClosed",
+  "mute-absent": "errMuteAbsent",
+  "bad-message": "errBadMessage",
   "rate-limited": "errRateLimited",
   "frame-too-large": "errFrameTooLarge",
   "session-degraded": "errSessionDegraded",

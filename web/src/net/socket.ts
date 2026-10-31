@@ -43,6 +43,19 @@ export function connectRoom(url: string, token: string, name = ""): RoomSocket {
   const closeListeners = new Set<(info: SocketCloseInfo) => void>();
   const violationListeners = new Set<(raw: string) => void>();
 
+  // Control frames sent while the handshake is still connecting are queued
+  // and flushed in order on open. The mic-open right after `connectRoom`
+  // otherwise races the opening socket and is silently dropped, leaving the
+  // user unheard until they toggle again. Binary audio stays drop-on-connect:
+  // frames sent before the handshake carry no mic-open authority.
+  const pendingControl: ClientMsg[] = [];
+
+  socket.addEventListener("open", () => {
+    for (const msg of pendingControl.splice(0)) {
+      socket.send(JSON.stringify(msg));
+    }
+  });
+
   function dispatch<T>(listeners: ReadonlySet<(value: T) => void>, value: T): void {
     for (const listener of listeners) listener(value);
   }
@@ -78,6 +91,10 @@ export function connectRoom(url: string, token: string, name = ""): RoomSocket {
 
   return {
     send(msg: ClientMsg): void {
+      if (socket.readyState === WebSocket.CONNECTING) {
+        pendingControl.push(msg);
+        return;
+      }
       if (socket.readyState !== WebSocket.OPEN) return;
       socket.send(JSON.stringify(msg));
     },

@@ -1,19 +1,20 @@
 // T-016: room audio shell — the ONLY place the room socket meets the audio
 // path. Wires `RoomSocket.sendAudio`/`onAudio` to `AudioFrameSender` (uplink,
-// T-010) and `PlaybackScheduler` (downlink, T-011), registers the latency stats
-// reader (T-012), honours `?injectAudio=1` (synthetic sine via the capture seam,
-// OQ-10), and calls `interrupt()` when the floor moves away from this tab.
+// T-010) and the per-speaker `SpeakerMixer` (downlink, T-011), registers the
+// latency stats reader (T-012), honours `?injectAudio=1` (synthetic sine via
+// the capture seam, OQ-10), and applies mic semantics (docs/MIC-CONTROL.md).
 //
-// Floor discipline (docs/FLOOR-CONTROL.md, server-authoritative): unmute sends
-// `speaking-start` (teacher preempts; a student without a grant gets a
-// `not-your-floor` error rendered by Room), mute sends `speaking-stop`. Audio
-// frames from a non-holder are dropped server-side, so starting/stopping the
-// local source on the same gesture keeps the wire clean. Memory only
-// (AGENTS.md rule 2); no persistence, no secrets, no translation-SDK imports.
+// Mic control is server-authoritative: `openMic`/`closeMic` send
+// `mic-open`/`mic-close` and start/stop the local capture on the same gesture.
+// A server `mic-changed` with `micOpen:false` for THIS participant stops the
+// source without echoing a control frame. Playback is NEVER interrupted on mic
+// or roster changes (PROTOCOL §3.1) — each pipe drains on the audio clock;
+// mixer streams whose speaker left the roster are pruned by stable index.
+// Memory only (AGENTS.md rule 2); no persistence, no secrets, no
+// translation-SDK imports.
 
-import { decodeAudioFrame, type FloorHolder } from "@fitra/shared";
+import { decodeAudioFrame } from "@fitra/shared";
 import type { RoomSocket } from "../net/socket.js";
-import { floorLost } from "./floorGate.js";
 import {
   AudioFrameSender,
   createAudioInjector,
@@ -24,56 +25,16 @@ import {
 } from "./capture.js";
 import type { CaptureNotice } from "./devices.js";
 import { setLatencyStatsReader } from "./latency.js";
-import {
-  downlinkPacketFromFrame,
-  PlaybackScheduler,
-  type PlaybackPacket,
-  type PlaybackStats,
-} from "./playback.js";
+import { createMixer } from "./playback.js";
 
 export interface RoomAudioOptions {
   readonly onMicError?: (notice: CaptureNotice) => void;
 }
 
 export interface RoomAudioHandle {
-  /** Wire to `RoomProps.onMicToggle`: false = unmuted/speaking, true = muted. */
-  setMuted(muted: boolean): void;
+  openMic(): void;
+  closeMic(): void;
   dispose(): void;
-}
-
-/** Subset of PlaybackScheduler used here; the null fallback matches it. */
-interface PlaybackSink {
-  pushPacket(packet: PlaybackPacket): void;
-  interrupt(): void;
-  dispose(): void;
-  readonly stats: PlaybackStats;
-}
-
-/** Headless-safe fallback: counts frames so latency/metrics keep working. */
-class NullPlayback implements PlaybackSink {
-  private framesPlayedCount = 0;
-
-  pushPacket(packet: PlaybackPacket): void {
-    if (packet.pcm24k.length > 0) this.framesPlayedCount += 1;
-  }
-
-  interrupt(): void {
-    return undefined;
-  }
-
-  dispose(): void {
-    return undefined;
-  }
-
-  get stats(): PlaybackStats {
-    return {
-      framesPlayed: this.framesPlayedCount,
-      gaps: 0,
-      overruns: 0,
-      underruns: 0,
-      bufferedMs: 0,
-    };
-  }
 }
 
 /** E2E surface: live counters polled by `e2e/m0-flow.spec.ts` (T-016). */
@@ -87,14 +48,6 @@ export interface RoomAudioTestHooks {
 declare global {
   interface Window {
     __fitraAudio?: RoomAudioTestHooks;
-  }
-}
-
-function createSink(): PlaybackSink {
-  try {
-    return new PlaybackScheduler(new AudioContext());
-  } catch {
-    return new NullPlayback();
   }
 }
 
@@ -117,10 +70,8 @@ export function attachRoomAudio(
     },
   };
   const sender = new AudioFrameSender(adapter);
-  const sink = createSink();
+  const mixer = createMixer();
   let selfId: string | null = null;
-  let lastFloor: FloorHolder | null = null;
-  let role: "teacher" | "student" = "student";
   let receivedCount = 0;
   let injector: AudioInjector | null = null;
   let mic: MicCapture | null = null;
@@ -128,41 +79,37 @@ export function attachRoomAudio(
 
   setLatencyStatsReader({
     captureStats: () => sender.stats,
-    playbackStats: () => sink.stats,
+    playbackStats: () => mixer.stats,
   });
 
   window.__fitraAudio = {
     pid: () => selfId,
     sent: () => sender.stats.framesSent,
     received: () => receivedCount,
-    played: () => sink.stats.framesPlayed,
+    played: () => mixer.stats.framesPlayed,
   };
 
   const offServer = socket.onServer((msg) => {
     if (disposed) return;
     if (msg.t === "welcome") {
       selfId = msg.participantId;
-      lastFloor = msg.floor;
       sender.setSpeakerIndex(msg.participantIndex);
+      // Roster indexes are stable and never reused (PROTOCOL §3.2): dropping
+      // streams whose speaker is gone keeps rejoin churn from accumulating.
+      mixer.prune(new Set(msg.roster.map((entry) => entry.participantIndex)));
       return;
     }
-    if (msg.t === "floor-changed") {
-      if (floorLost(lastFloor, msg.floor, role, selfId)) sink.interrupt();
-      lastFloor = msg.floor;
+    if (msg.t === "mic-changed" && msg.participantId === selfId && !msg.micOpen) {
+      // Server-authoritative cut (teacher mute / mute-all): stop the local
+      // source; the wire already knows, so no control frame is echoed.
+      stopSource();
     }
-  });
-  // Role arrives via the room route, not the wire: infer it from the roster
-  // row that matches our own join (welcome carries the full roster).
-  const offServerRole = socket.onServer((msg) => {
-    if (msg.t !== "welcome") return;
-    const self = msg.roster.find((e) => e.participantId === msg.participantId);
-    if (self !== undefined) role = self.role;
   });
 
   const offAudio = socket.onAudio((frame) => {
     receivedCount += 1;
     try {
-      sink.pushPacket(downlinkPacketFromFrame(decodeAudioFrame(new Uint8Array(frame))));
+      mixer.demux(decodeAudioFrame(new Uint8Array(frame)));
     } catch {
       // Malformed downlink: drop it; the gap counter shows the loss.
     }
@@ -194,15 +141,15 @@ export function attachRoomAudio(
   }
 
   return {
-    setMuted(muted: boolean): void {
+    openMic(): void {
       if (disposed) return;
-      if (muted) {
-        socket.send({ t: "speaking-stop" });
-        stopSource();
-      } else {
-        socket.send({ t: "speaking-start" });
-        startSource();
-      }
+      socket.send({ t: "mic-open" });
+      startSource();
+    },
+    closeMic(): void {
+      if (disposed) return;
+      socket.send({ t: "mic-close" });
+      stopSource();
     },
     dispose(): void {
       disposed = true;
@@ -214,10 +161,9 @@ export function attachRoomAudio(
         mic = null;
       }
       offServer();
-      offServerRole();
       offAudio();
       setLatencyStatsReader(null);
-      sink.dispose();
+      mixer.dispose();
       if (window.__fitraAudio !== undefined) delete window.__fitraAudio;
     },
   };

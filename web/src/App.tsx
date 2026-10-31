@@ -252,8 +252,8 @@ function Home({
       </section>
 
       <section className="ui-card mt-6 p-5">
-        <h2 className="ui-section-title">{strings.homeFloorTitle}</h2>
-        <p className="ui-subtitle mt-2 text-base">{strings.homeFloorBody}</p>
+        <h2 className="ui-section-title">{strings.homeMicTitle}</h2>
+        <p className="ui-subtitle mt-2 text-base">{strings.homeMicBody}</p>
       </section>
     </main>
   );

@@ -101,7 +101,7 @@ export class LatencyEstimator {
    * A translated chunk came back at `now`: close the round trip opened by the
    * oldest outstanding chunk and return that round trip in milliseconds, or
    * `null` when nothing was outstanding (translated audio for someone else's
-   * speech, a late chunk after the floor moved, or audio arriving first).
+   * speech, a late chunk after the mic closed, or audio arriving first).
    */
   recordChunkReceived(now: number = latencyNow()): number | null {
     if (this.pending.length === 0) {
@@ -193,7 +193,7 @@ export class LatencyEstimator {
     return { ms: median, samples: this.window.length };
   }
 
-  /** Drop the window and every outstanding chunk (floor revoke / new session). */
+  /** Drop the window and every outstanding chunk (mic close / new session). */
   reset(): void {
     this.window.length = 0;
     this.pending = [];

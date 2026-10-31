@@ -3,7 +3,7 @@
  *
  * Everything the UI uses must come from these tokens. No component may invent a
  * colour, radius, shadow or font step. Palette: warm "paper" surfaces, deep
- * violet-ink text, teal primary (brand), saffron accent (floor / live state /
+ * violet-ink text, teal primary (brand), saffron accent (live mic state /
  * test-deployment badge). Chosen for Arabic-first legibility and for a
  * classroom product that must feel calm, not "AI purple gradient".
  */
@@ -41,7 +41,7 @@ export default {
           700: "#0B4F4D",
           900: "#052E2D",
         },
-        // Saffron — live floor, warnings, test-deployment badge.
+        // Saffron — live mic state, warnings, test-deployment badge.
         saffron: {
           50: "#FDF4E3",
           100: "#FBE7BE",

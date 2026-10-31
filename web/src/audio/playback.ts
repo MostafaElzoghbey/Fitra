@@ -11,8 +11,12 @@
  * hand-rolled resampler and no per-sample worklet cost.
  *
  * Wiring: the WS binary frame is decoded by the caller with
- * `decodeAudioFrame` from `@fitra/shared`, then converted with
- * {@link downlinkPacketFromFrame} and passed to {@link PlaybackScheduler.pushPacket}.
+ * `decodeAudioFrame` from `@fitra/shared`. Downlink `seq` is per (listener,
+ * speaker-pipe) (PROTOCOL §2): {@link SpeakerMixer} demultiplexes frames by
+ * their `speaker` index into one {@link PlaybackScheduler} per source speaker,
+ * so parallel pipes keep independent gap/PLC cursors and the browser mixes
+ * them naturally. A single-stream caller can pass packets straight to
+ * {@link PlaybackScheduler.pushPacket} via {@link downlinkPacketFromFrame}.
  *
  * Ownership: this module never creates an `AudioContext`. The App owns a
  * dedicated "playback" context (separate from the capture context) and passes
@@ -198,39 +202,6 @@ export class PlaybackScheduler {
     this.pump();
   }
 
-  /**
-   * Floor-revoke path: drop everything pending, silence scheduled sources,
-   * and reset cursors so the next spurt re-prerolls cleanly.
-   */
-  interrupt(): void {
-    this.pending.length = 0;
-    this.expectedSeq = null;
-    this.nextTime = null;
-    this.clearEmptyTimer();
-    if (this.disposed) {
-      return;
-    }
-    const now = this.ctx.currentTime;
-    for (const node of this.liveNodes) {
-      try {
-        node.stop(now);
-      } catch {
-        // Already ended/never started; the onended hook cleans the set.
-      }
-    }
-    this.liveNodes.clear();
-    try {
-      const gain = this.master.gain;
-      gain.cancelScheduledValues(now);
-      gain.setValueAtTime(gain.value, now);
-      gain.linearRampToValueAtTime(0.0001, now + 0.02);
-      gain.setValueAtTime(0.0001, now + 0.03);
-      gain.linearRampToValueAtTime(1, now + 0.08);
-    } catch {
-      // Context closed mid-revoke; nothing audible left to ramp.
-    }
-  }
-
   /** Live counters for the T-012 latency/metrics panel. */
   get stats(): PlaybackStats {
     return {
@@ -376,10 +347,115 @@ export class PlaybackScheduler {
       this.underrunsCount += 1;
       this.nextTime = null;
       // Fresh sync on the next spurt: avoids a PLC silence balloon
-      // after natural speech pauses (floor idle -> no packets).
+      // after natural speech pauses (mic idle -> no packets).
       this.expectedSeq = null;
       return;
     }
     this.armEmptyTimer();
+  }
+}
+
+/** The downlink surface the room shell consumes. */
+export interface AudioDemuxer {
+  /** Route one decoded downlink frame to its source speaker's stream. */
+  demux(frame: DecodedAudioFrame): void;
+  /** Drop streams whose speaker index left the roster (indexes are never reused). */
+  prune(liveSpeakerIndexes: ReadonlySet<number>): void;
+  dispose(): void;
+  readonly stats: PlaybackStats;
+}
+
+/**
+ * Per-speaker playback: PROTOCOL §2 assigns downlink `seq` per (listener,
+ * speaker-pipe), so parallel speakers must not share one gap/PLC cursor.
+ * Each speaker index gets its own scheduler against one shared AudioContext;
+ * the browser mixes their master gains.
+ */
+export class SpeakerMixer implements AudioDemuxer {
+  private readonly ctx: AudioContext;
+  private readonly speakers = new Map<number, PlaybackScheduler>();
+
+  constructor(ctx: AudioContext) {
+    this.ctx = ctx;
+  }
+
+  demux(frame: DecodedAudioFrame): void {
+    let scheduler = this.speakers.get(frame.speaker);
+    if (scheduler === undefined) {
+      scheduler = new PlaybackScheduler(this.ctx);
+      this.speakers.set(frame.speaker, scheduler);
+    }
+    scheduler.pushPacket(downlinkPacketFromFrame(frame));
+  }
+
+  prune(liveSpeakerIndexes: ReadonlySet<number>): void {
+    for (const [speaker, scheduler] of this.speakers) {
+      if (!liveSpeakerIndexes.has(speaker)) {
+        scheduler.dispose();
+        this.speakers.delete(speaker);
+      }
+    }
+  }
+
+  get stats(): PlaybackStats {
+    const total = {
+      framesPlayed: 0,
+      gaps: 0,
+      overruns: 0,
+      underruns: 0,
+      bufferedMs: 0,
+    };
+    for (const scheduler of this.speakers.values()) {
+      const s = scheduler.stats;
+      total.framesPlayed += s.framesPlayed;
+      total.gaps += s.gaps;
+      total.overruns += s.overruns;
+      total.underruns += s.underruns;
+      total.bufferedMs += s.bufferedMs;
+    }
+    return total;
+  }
+
+  dispose(): void {
+    for (const scheduler of this.speakers.values()) {
+      scheduler.dispose();
+    }
+    this.speakers.clear();
+  }
+}
+
+/** Headless-safe fallback: counts frames so latency/metrics keep working. */
+class NullMixer implements AudioDemuxer {
+  private framesPlayedCount = 0;
+
+  demux(frame: DecodedAudioFrame): void {
+    if (frame.payload.length > 0) this.framesPlayedCount += 1;
+  }
+
+  prune(_liveSpeakerIndexes: ReadonlySet<number>): void {
+    return undefined;
+  }
+
+  dispose(): void {
+    return undefined;
+  }
+
+  get stats(): PlaybackStats {
+    return {
+      framesPlayed: this.framesPlayedCount,
+      gaps: 0,
+      overruns: 0,
+      underruns: 0,
+      bufferedMs: 0,
+    };
+  }
+}
+
+/** Real mixer when an AudioContext exists; counting fallback otherwise. */
+export function createMixer(): AudioDemuxer {
+  try {
+    return new SpeakerMixer(new AudioContext());
+  } catch {
+    return new NullMixer();
   }
 }
