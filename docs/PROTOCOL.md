@@ -98,7 +98,8 @@ interface RoomMetrics {
 
 Error codes: `unauthorized`, `teacher-taken`, `room-full`,
 `unsupported-language`, `mic-forced-muted` (a force-muted student sent
-`mic-open` — refused, mic stays closed), `mic-closed` (audio frame from a
+`mic-open` or an audio frame — refused/dropped, mic stays closed; the client
+treats this as "the teacher muted you"), `mic-closed` (audio frame from a
 participant whose mic is closed — frame dropped, violation counted),
 `rate-limited`, `frame-too-large`,
 `session-degraded`, `room-closed`, `creation-disabled`.

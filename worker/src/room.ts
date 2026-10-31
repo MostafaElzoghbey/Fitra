@@ -761,13 +761,23 @@ export class ClassRoom {
       type: "audioFrame",
       participantId: member.pid,
     });
-    if (gate.broadcasts.length > 0) {
+    const rejection = gate.broadcasts[0];
+    if (rejection !== undefined && rejection.type === "error") {
       this.micViolations += 1;
+      const code = asRejectCode(rejection.code);
+      // The machine answers the truthful reason (a force-muted sender gets
+      // `mic-forced-muted`, not "open your mic"); the DO only appends the
+      // violation counter.
       this.sendError(
         ws,
-        "mic-closed",
-        `audio from ${member.pid} dropped: the mic is closed (violation ${this.micViolations})`,
+        code,
+        `${micErrorMessage(code, member.pid)} (violation ${this.micViolations})`,
       );
+      return;
+    }
+    if (rejection !== undefined) {
+      // The audioFrame arm never emits non-error broadcasts; kept for the
+      // exhaustive MicBroadcast shape.
       return;
     }
     if (!this.checkAudioRate(ws, member)) return;

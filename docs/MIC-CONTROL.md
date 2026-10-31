@@ -41,7 +41,7 @@ only; students keep talking to each other).
 | `mute-all` | teacher | Every student: `forcedMuted=true`; open mics cut as above; `muteAllActive=true`. One `roster` broadcast + one `mic-changed{pid,false}` per participant that actually had an open mic. |
 | `unmute {pid}` | teacher | `forcedMuted=false`; `roster` broadcast. Does NOT open their mic — the student still decides. |
 | `unmute-all` | teacher | Clear `forcedMuted` for every student; `muteAllActive=false`; `roster` broadcast. |
-| audio frame | sender | Requires `micOpen`. Closed mic → frame dropped, violation counted, `error{mic-closed}` to sender. |
+| audio frame | sender | Requires `micOpen`. Closed mic → frame dropped, violation counted, `error{mic-closed}` to sender — except when the sender is force-muted, where the truthful reason `error{mic-forced-muted}` is answered instead (so the client's UI never reports "open your mic" for a teacher mute). |
 
 ## Normative edge cases
 

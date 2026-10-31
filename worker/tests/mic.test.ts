@@ -247,6 +247,16 @@ describe("mic control transition table (docs/MIC-CONTROL.md)", () => {
     ]);
   });
 
+  it("row 19b: audio frame from a force-muted student -> truthful mic-forced-muted error", () => {
+    const s = base({ forcedMuted: new Set(["s1"]) });
+    const r = applyMicEvent(s, { type: "audioFrame", participantId: "s1" });
+    expect(r.state).toEqual(s);
+    expect(r.effects).toEqual([]);
+    expect(r.broadcasts).toEqual([
+      { type: "error", code: "mic-forced-muted", to: "s1" },
+    ]);
+  });
+
   it("row 20: disconnect of an open-mic student -> cut + force flag cleared", () => {
     let s = base({ forcedMuted: new Set(["s1"]) });
     s = openMic({ ...s, forcedMuted: new Set() }, "s1");

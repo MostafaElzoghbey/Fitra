@@ -285,6 +285,18 @@ export function applyMicEvent(
       if (isMicOpen(state, event.participantId)) {
         return { state, broadcasts: [], effects: [] };
       }
+      // A force-muted sender's frames answer with the truthful reason: their
+      // mic is closed because the teacher muted them. `mic-closed` ("open
+      // your mic") would be a lie the client's banner then surfaces verbatim.
+      if (state.forcedMuted.has(event.participantId)) {
+        return {
+          state,
+          broadcasts: [
+            { type: "error", code: "mic-forced-muted", to: event.participantId },
+          ],
+          effects: [],
+        };
+      }
       return {
         state,
         broadcasts: [

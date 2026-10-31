@@ -365,6 +365,35 @@ describe("ClassRoom mic control via the pure machine (T-028)", () => {
     expect(b.received.filter((m) => m.t === "error")).toHaveLength(2);
   });
 
+  it("after a teacher cut, the force-muted student's frames answer mic-forced-muted, not mic-closed", async () => {
+    const room = freshRoom();
+    const { teacher, a, b } = await trio(room);
+
+    // Marco is speaking when the teacher force-mutes him: the cut lands
+    // (mic-changed{false}) while frames are still streaming.
+    send(a.ws, { t: "mic-open" });
+    for (const inbox of [teacher, a, b]) await inbox.nextOfType("mic-changed");
+    send(teacher.ws, { t: "mute", participantId: "s-a" });
+    await a.nextOfType("mic-changed");
+    await b.nextOfType("mic-changed");
+    await teacher.nextOfType("mic-changed");
+
+    // In-flight frames hit the closed mic; the answer must be the forced
+    // reason so the client banner never says "open your mic" here.
+    a.ws.send(new Uint8Array([1, 1, 0, 0, 0, 0, 0, 0]));
+    expect(await a.nextError()).toMatchObject({
+      t: "error",
+      code: "mic-forced-muted",
+    });
+
+    // The reopen attempt gets the same truthful reason.
+    send(a.ws, { t: "mic-open" });
+    expect(await a.nextError()).toMatchObject({
+      t: "error",
+      code: "mic-forced-muted",
+    });
+  });
+
   it("mic-close broadcasts mic-changed{false} to every socket", async () => {
     const room = freshRoom();
     const { teacher, a, b } = await trio(room);
