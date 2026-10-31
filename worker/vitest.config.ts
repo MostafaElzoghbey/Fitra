@@ -1,7 +1,7 @@
 // Vitest config for `worker/`.
 //
 // Two projects:
-//   - `unit`  — pure logic (token, floor machine, fake provider, SessionManager,
+//   - `unit`  — pure logic (token, mic machine, fake provider, SessionManager,
 //               Hono routes). Runs on the default threads pool.
 //   - `do`    — ClassRoom Durable Object over the real Workers pool
 //               (`@cloudflare/vitest-plugin`, workerd + Miniflare). Needed for
@@ -12,7 +12,7 @@
 // `new_sqlite_classes` migration match what ships. `JOIN_TOKEN_HMAC_SECRET` is a
 // secret (never in wrangler.jsonc) so the test-only value is injected here as a
 // plain Miniflare binding. MAX_STUDENTS is pinned to 4 so the room-full case
-// stays reachable while floor tests can seat two students plus a teacher.
+// stays reachable while mic tests can seat two students plus a teacher.
 import { defineConfig } from "vitest/config";
 import { cloudflareTest } from "@cloudflare/vitest-plugin";
 
@@ -37,7 +37,7 @@ export default defineConfig({
           include: ["tests/**/*.test.ts"],
           exclude: [
             "tests/room.test.ts",
-            "tests/floor-do.test.ts",
+            "tests/mic-do.test.ts",
             "tests/fanout.test.ts",
             "tests/metrics-do.test.ts",
             "node_modules/**",
@@ -70,7 +70,7 @@ export default defineConfig({
           name: "do",
           include: [
             "tests/room.test.ts",
-            "tests/floor-do.test.ts",
+            "tests/mic-do.test.ts",
             "tests/fanout.test.ts",
             "tests/metrics-do.test.ts",
           ],

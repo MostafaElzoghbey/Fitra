@@ -122,11 +122,10 @@ async function connect(room: string, join: Join): Promise<Inbox> {
   return new Inbox(ws);
 }
 
-async function drainWelcomeAndHands(inbox: Inbox, welcomes: number): Promise<void> {
+async function drainWelcome(inbox: Inbox, welcomes: number): Promise<void> {
   for (let i = 0; i < welcomes; i += 1) {
     await inbox.nextOfType("welcome");
   }
-  await inbox.nextOfType("hands");
 }
 
 /** 8-byte type-0x01 uplink audio frame (16 kHz mono PCM16LE payload). */
@@ -142,7 +141,7 @@ function uplinkFrame(seq: number, payload: Uint8Array): Uint8Array {
   return out;
 }
 
-/** Teacher (ar) + en student, floor granted to the teacher, joins drained. */
+/** Teacher (ar) + en student, teacher mic open, joins drained. */
 async function liveRoom(room: string): Promise<{
   readonly teacher: Inbox;
   readonly student: Inbox;
@@ -153,7 +152,7 @@ async function liveRoom(room: string): Promise<{
     lang: "ar",
     name: "Layla",
   });
-  await drainWelcomeAndHands(teacher, 1);
+  await drainWelcome(teacher, 1);
   const student = await connect(room, {
     pid: "s-en",
     role: "student",
@@ -161,13 +160,13 @@ async function liveRoom(room: string): Promise<{
     name: "Marco",
   });
   await teacher.nextOfType("welcome");
-  await drainWelcomeAndHands(student, 1);
+  await drainWelcome(student, 1);
 
-  teacher.ws.send(JSON.stringify({ t: "speaking-start" }));
-  const changed = await teacher.nextOfType("floor-changed");
-  expect(changed.floor).toEqual({ kind: "teacher" });
-  expect(await student.nextOfType("floor-changed")).toEqual(changed);
-  // The grant pre-warms ar->en; the fake provider goes live on a macrotask.
+  teacher.ws.send(JSON.stringify({ t: "mic-open" }));
+  const changed = { t: "mic-changed", participantId: "t", micOpen: true };
+  expect(await teacher.nextOfType("mic-changed")).toEqual(changed);
+  expect(await student.nextOfType("mic-changed")).toEqual(changed);
+  // The open pre-warms 0:ar->en; the fake provider goes live on a macrotask.
   await teacher.nextOfType("session-status");
   await student.nextOfType("session-status");
   return { teacher, student };
@@ -179,7 +178,7 @@ describe("T-020: DO metrics broadcast", () => {
     const { teacher, student } = await liveRoom(room);
 
     // Let the forced pre-warm pulse clear the 2 s throttle, then discard
-    // frames already queued by the join/floor handshake.
+    // frames already queued by the join/mic-open handshake.
     await new Promise((resolve) => setTimeout(resolve, 2100));
     teacher.textCursor = teacher.text.length;
     student.textCursor = student.text.length;
@@ -206,18 +205,19 @@ describe("T-020: DO metrics broadcast", () => {
     expect(m.e2eLatencyMs).toBeNull();
     expect(m.doActiveSec).toBeGreaterThanOrEqual(0);
     expect(m.sessions).toEqual([
-      { pair: "ar->en", status: "live", reconnects: 0 },
+      { pair: "0:ar->en", status: "live", reconnects: 0 },
     ]);
   }, 30_000);
 
-  it("increments errorsLastMin after a non-floor audio frame error", async () => {
+  it("increments errorsLastMin after a closed-mic audio frame error", async () => {
     const room = freshRoom();
     const { student } = await liveRoom(room);
 
-    // Student sends audio without holding the floor -> error{not-your-floor}.
+    // The student's mic is still closed (only the teacher opened theirs):
+    // the gate answers error{mic-closed}.
     student.ws.send(uplinkFrame(0, new Uint8Array(320).fill(0x22)));
     const err = await student.nextOfType("error");
-    expect(err.code).toBe("not-your-floor");
+    expect(err.code).toBe("mic-closed");
     student.textCursor = student.text.length;
 
     // The error path itself does not pulse; wait out the 2 s throttle, then
@@ -237,9 +237,9 @@ describe("T-020: DO metrics broadcast", () => {
       lang: "ar",
       name: "Layla",
     });
-    await drainWelcomeAndHands(teacher, 1);
-    // Join activity may legitimately pulse once (floor publication); drain
-    // anything already in flight, then the room must stay silent: no timers.
+    await drainWelcome(teacher, 1);
+    // Join activity may legitimately pulse once; drain anything already in
+    // flight, then the room must stay silent: no timers.
     await new Promise((resolve) => setTimeout(resolve, 300));
     teacher.textCursor = teacher.text.length;
     await teacher.quietText(3000);

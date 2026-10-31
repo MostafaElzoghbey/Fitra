@@ -6,9 +6,10 @@ import type {
 } from "./provider.js";
 
 // SessionManager (T-008): lazy/shared/refcounted translation sessions.
-// Key = src->tgt. Pure logic over TranslationProvider; no socket/DO code.
-// T-009 drives acquire/release per floor holder + listener languages and
-// consumes onSessionStatus for `session-status` broadcasts (docs/PROTOCOL.md).
+// Key = speakerIndex:src->tgt (T-028 mic model: one independent pipe per open
+// mic per target language). Pure logic over TranslationProvider; no socket/DO
+// code. The DO acquires/releases per speaker + listener languages and consumes
+// onSessionStatus for `session-status` broadcasts (docs/PROTOCOL.md).
 
 /** Status union matches the wire `session-status` message (PROTOCOL.md §3). */
 export type SessionStatus =
@@ -18,24 +19,33 @@ export type SessionStatus =
   | "failed"
   | "degraded";
 
-/** Single status sink: (pair "src->tgt", status, reconnect attempt count). */
+/** Single status sink: (pipe key "speakerIndex:src->tgt", status, attempt). */
 export type SessionStatusCallback = (
   pair: string,
   status: SessionStatus,
   attempt: number,
 ) => void;
 
-/** Audio sink per pair; T-009 fans these chunks out to listeners. */
-export type SessionAudioCallback = (pair: string, pcm: ArrayBuffer) => void;
+/** Audio sink per pipe; the DO fans these chunks out to the pipe's listeners. */
+export type SessionAudioCallback = (
+  pair: string,
+  speakerIndex: number,
+  pcm: ArrayBuffer,
+) => void;
 
 export type SessionTranscriptCallback = (
   pair: string,
+  speakerIndex: number,
   kind: "input" | "output",
   text: string,
   final: boolean,
 ) => void;
 
-export type SessionGoAwayCallback = (pair: string, timeLeftMs: number) => void;
+export type SessionGoAwayCallback = (
+  pair: string,
+  speakerIndex: number,
+  timeLeftMs: number,
+) => void;
 
 export interface SessionManagerOptions {
   readonly maxSessions?: number;
@@ -65,8 +75,12 @@ const RECONNECT_CAP_MS = 5_000;
  * (rapid-fail exhaustion within 10 s still terminates the pair). */
 const STABLE_LIVE_RESET_MS = 10_000;
 
-export function pairKey(sourceLang: Lang, targetLang: Lang): string {
-  return `${sourceLang}->${targetLang}`;
+export function pipeKey(
+  speakerIndex: number,
+  sourceLang: Lang,
+  targetLang: Lang,
+): string {
+  return `${speakerIndex}:${sourceLang}->${targetLang}`;
 }
 
 // DO-alarm-safe discipline (ARCHITECTURE.md §3): one-shot setTimeout chains
@@ -146,6 +160,7 @@ type ProviderLiveStatus = "connecting" | "live" | "reconnecting";
 
 interface SessionEntry {
   readonly key: string;
+  readonly speakerIndex: number;
   readonly sourceLang: Lang;
   readonly targetLang: Lang;
   readonly listeners: Map<string, boolean>;
@@ -233,12 +248,13 @@ export class SessionManager {
   }
 
   acquire(
+    speakerIndex: number,
     sourceLang: Lang,
     targetLang: Lang,
     listenerId: string,
     opts: AcquireOptions = {},
   ): AcquireResult {
-    const key = pairKey(sourceLang, targetLang);
+    const key = pipeKey(speakerIndex, sourceLang, targetLang);
     const isTeacherLeg = opts.isTeacherLeg ?? false;
     const existing = this.entries.get(key);
     if (existing !== undefined) {
@@ -262,7 +278,7 @@ export class SessionManager {
       }
       return { session: existing.handle, degraded: false };
     }
-    // Cap (FR-024): existing pairs are all kept — teacher-leg sessions are
+    // Cap (FR-024): existing pipes are all kept — teacher-leg sessions are
     // never preempted and earliest-created hold their slots; the newcomer is
     // degraded with a muted handle. Degraded acquires are stateless (no slot
     // held) so a later acquire retries for a live session.
@@ -272,6 +288,7 @@ export class SessionManager {
     }
     const entry: SessionEntry = {
       key,
+      speakerIndex,
       sourceLang,
       targetLang,
       listeners: new Map<string, boolean>([[listenerId, isTeacherLeg]]),
@@ -309,6 +326,27 @@ export class SessionManager {
   /** Flush buffered input on every open pair (speaker paused mid-sentence). */
   endInputAll(): void {
     for (const entry of this.entries.values()) entry.underlying?.endInput();
+  }
+
+  /** Flush one speaker's pipes only (mic close): other speakers keep streaming. */
+  flushSpeaker(speakerIndex: number): void {
+    for (const entry of this.entries.values()) {
+      if (entry.speakerIndex === speakerIndex) entry.underlying?.endInput();
+    }
+  }
+
+  /**
+   * Tear down one speaker's pipes (force-mute / disconnect): release every
+   * listener ref and arm the idle close, so the already-translating tail
+   * drains inside the idle window instead of the pipe living forever.
+   */
+  closeSpeakerPipes(speakerIndex: number): void {
+    for (const entry of this.entries.values()) {
+      if (entry.speakerIndex !== speakerIndex) continue;
+      entry.listeners.clear();
+      entry.teacherLeg = false;
+      this.armIdle(entry);
+    }
   }
 
   /** Shutdown path for room teardown: clears timers, closes all sessions. */
@@ -376,15 +414,15 @@ export class SessionManager {
     return {
       onAudio: (pcm: ArrayBuffer) => {
         if (!this.isCurrent(entry, gen)) return;
-        this.onAudio?.(entry.key, pcm);
+        this.onAudio?.(entry.key, entry.speakerIndex, pcm);
       },
       onTranscript: (kind, text, final) => {
         if (!this.isCurrent(entry, gen)) return;
-        this.onTranscript?.(entry.key, kind, text, final);
+        this.onTranscript?.(entry.key, entry.speakerIndex, kind, text, final);
       },
       onGoAway: (timeLeftMs) => {
         if (!this.isCurrent(entry, gen)) return;
-        this.onGoAway?.(entry.key, timeLeftMs);
+        this.onGoAway?.(entry.key, entry.speakerIndex, timeLeftMs);
         this.emit(entry.key, "reconnecting", entry.attempts);
       },
       onResumption: (handle) => {

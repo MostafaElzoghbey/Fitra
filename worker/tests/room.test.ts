@@ -318,16 +318,17 @@ describe("ClassRoom membership + roster (FR-001/002, PROTOCOL section 3)", () =>
     const teacherWelcome = welcomeOf(await teacher.nextOfType("welcome"));
     expect(teacherWelcome.participantId).toBe("pid-teacher");
     expect(teacherWelcome.participantIndex).toBe(0);
-    expect(teacherWelcome.floor).toEqual({ kind: "none" });
     expect(teacherWelcome.roster).toEqual([
       {
         participantId: "pid-teacher",
+        participantIndex: 0,
         name: "Layla",
         role: "teacher",
         lang: "ar",
+        micOpen: false,
+        forcedMuted: false,
       },
     ]);
-    expect(await teacher.nextOfType("hands")).toEqual({ t: "hands", raised: [] });
 
     const student = await connect(room, {
       pid: "pid-student",
@@ -339,22 +340,26 @@ describe("ClassRoom membership + roster (FR-001/002, PROTOCOL section 3)", () =>
     const studentWelcome = welcomeOf(await student.nextOfType("welcome"));
     expect(studentWelcome.participantId).toBe("pid-student");
     expect(studentWelcome.participantIndex).toBe(1);
-    expect(studentWelcome.floor).toEqual({ kind: "none" });
     expect(studentWelcome.roster).toEqual([
       {
         participantId: "pid-teacher",
+        participantIndex: 0,
         name: "Layla",
         role: "teacher",
         lang: "ar",
+        micOpen: false,
+        forcedMuted: false,
       },
       {
         participantId: "pid-student",
+        participantIndex: 1,
         name: "Marco",
         role: "student",
         lang: "en",
+        micOpen: false,
+        forcedMuted: false,
       },
     ]);
-    expect(await student.nextOfType("hands")).toEqual({ t: "hands", raised: [] });
 
     const teacherSync = welcomeOf(await teacher.nextOfType("welcome"));
     expect(rosterNames(teacherSync)).toEqual(["Layla", "Marco"]);
@@ -562,7 +567,7 @@ describe("ClassRoom webSocketMessage routing", () => {
     });
     await student.nextOfType("welcome");
 
-    student.ws.send(JSON.stringify({ t: "raise-hand", bogus: 1 }));
+    student.ws.send(JSON.stringify({ t: "mic-open", bogus: 1 }));
     expect(await student.nextError()).toMatchObject({
       t: "error",
       code: "bad-message",
@@ -606,7 +611,7 @@ describe("ClassRoom webSocketMessage routing", () => {
     expect(await student.nextOfType("pong")).toEqual({ t: "pong", id: 7 });
   });
 
-  it("routes valid floor messages through the floor machine (T-007)", async () => {
+  it("routes valid mic messages through the mic machine (T-028)", async () => {
     const room = freshRoom();
     const teacher = await connect(room, {
       pid: "t1",
@@ -615,7 +620,6 @@ describe("ClassRoom webSocketMessage routing", () => {
       name: "Layla",
     });
     await teacher.nextOfType("welcome");
-    await teacher.nextOfType("hands");
     const student = await connect(room, {
       pid: "s1",
       role: "student",
@@ -623,37 +627,37 @@ describe("ClassRoom webSocketMessage routing", () => {
       name: "Marco",
     });
     await student.nextOfType("welcome");
-    await student.nextOfType("hands");
     await teacher.nextOfType("welcome");
 
-    // Student raise-hand is accepted: every socket sees the hands update.
-    student.ws.send(JSON.stringify({ t: "raise-hand" }));
-    expect(await student.nextOfType("hands")).toEqual({
-      t: "hands",
-      raised: ["s1"],
-    });
-    expect(await teacher.nextOfType("hands")).toEqual({
-      t: "hands",
-      raised: ["s1"],
-    });
+    // Student mic-open is accepted: every socket sees the mic update.
+    student.ws.send(JSON.stringify({ t: "mic-open" }));
+    const changed = { t: "mic-changed", participantId: "s1", micOpen: true };
+    expect(await student.nextOfType("mic-changed")).toEqual(changed);
+    expect(await teacher.nextOfType("mic-changed")).toEqual(changed);
+    // The open prewarms the s1 pipe set: session-status chatter may still be
+    // landing (fake provider timers); let it settle before the quiet checks.
+    await new Promise((resolve) => setTimeout(resolve, 200));
 
-    // Ungranted student speaking-start is rejected, never silent.
-    student.ws.send(JSON.stringify({ t: "speaking-start" }));
+    // Student mute is a role violation, answered to the sender only.
+    student.ws.send(JSON.stringify({ t: "mute", participantId: "s1" }));
     expect(await student.nextError()).toMatchObject({
       t: "error",
-      code: "not-your-floor",
+      code: "bad-message",
     });
+    // From here on the student must stay error-free.
+    const mark = student.received.length;
 
-    // Student grant is a role violation, answered to the sender only.
-    student.ws.send(JSON.stringify({ t: "grant", participantId: "s1" }));
-    expect(await student.nextError()).toMatchObject({
-      t: "error",
-      code: "not-your-floor",
-    });
-    await teacher.quiet();
+    // Mic-close is the student's own off switch, always allowed.
+    student.ws.send(JSON.stringify({ t: "mic-close" }));
+    const closed = { t: "mic-changed", participantId: "s1", micOpen: false };
+    expect(await student.nextOfType("mic-changed")).toEqual(closed);
+    expect(await teacher.nextOfType("mic-changed")).toEqual(closed);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(student.received.slice(mark).some((m) => m.t === "error")).toBe(false);
+    expect(teacher.received.some((m) => m.t === "error")).toBe(false);
   });
 
-  it("fans out a holder binary frame instead of erroring (T-009)", async () => {
+  it("fans out an open-mic binary frame instead of erroring (T-009)", async () => {
     const room = freshRoom();
     const teacher = await connect(room, {
       pid: "t1",
@@ -662,15 +666,14 @@ describe("ClassRoom webSocketMessage routing", () => {
       name: "Layla",
     });
     await teacher.nextOfType("welcome");
-    await teacher.nextOfType("hands");
 
-    // Rule 6: the gate drops non-holder audio, so the teacher takes the floor
+    // FR-012: the gate drops closed-mic audio, so the teacher opens their mic
     // before the frame reaches the T-009 fan-out.
-    teacher.ws.send(JSON.stringify({ t: "speaking-start" }));
-    expect(await teacher.nextOfType("floor-changed")).toEqual({
-      t: "floor-changed",
-      floor: { kind: "teacher" },
-      reason: "teacher-start",
+    teacher.ws.send(JSON.stringify({ t: "mic-open" }));
+    expect(await teacher.nextOfType("mic-changed")).toEqual({
+      t: "mic-changed",
+      participantId: "t1",
+      micOpen: true,
     });
 
     // Nobody else is in the room, so there is nothing to fan out to — and in
@@ -680,7 +683,7 @@ describe("ClassRoom webSocketMessage routing", () => {
     await teacher.quiet();
   });
 
-  it("drops a non-holder binary frame with error{not-your-floor} (rule 6)", async () => {
+  it("drops a closed-mic binary frame with error{mic-closed} (FR-012)", async () => {
     const room = freshRoom();
     const teacher = await connect(room, {
       pid: "t1",
@@ -689,12 +692,11 @@ describe("ClassRoom webSocketMessage routing", () => {
       name: "Layla",
     });
     await teacher.nextOfType("welcome");
-    await teacher.nextOfType("hands");
 
     teacher.ws.send(new Uint8Array([1, 1, 0, 0, 0, 0, 0, 0]));
     expect(await teacher.nextError()).toMatchObject({
       t: "error",
-      code: "not-your-floor",
+      code: "mic-closed",
     });
   });
 });

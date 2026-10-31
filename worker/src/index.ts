@@ -133,7 +133,7 @@ app.get("/api/health", (c) => {
 
 // T-016: browser WebSocket upgrade path (docs/PROTOCOL.md section 1:
 // `GET /rooms/:code/ws?token=<JOIN_TOKEN>`). Pure passthrough to the room's
-// DO: auth, membership and floor are decided there, from the raw query string.
+// DO: auth, membership and mic state are decided there, from the raw query string.
 app.get("/rooms/:code/ws", (c) => {
   const namespace = c.env.CLASSROOM;
   if (namespace === undefined) {
@@ -265,7 +265,7 @@ app.post("/rooms/:code/join", async (c) => {
 // Rejoin (latency/quality M0.5, PROTOCOL.md section 1): a dropped socket
 // replays its ORIGINAL token; the endpoint waives expiry but re-verifies
 // signature + claims, then re-mints the SAME pid with a fresh iat/exp so the
-// DO upgrade path and floor state keep the member identity stable.
+// DO upgrade path and mic state keep the member identity stable.
 app.post("/rooms/:code/rejoin", async (c) => {
   const env = c.env;
   const code = c.req.param("code");

@@ -90,7 +90,7 @@ describe("MetricsCollector: snapshot fields", () => {
   it("always reports e2eLatencyMs as null (never fabricated)", () => {
     const c = new MetricsCollector();
     c.recordInbound(0);
-    const snap = c.snapshot(1000, CREATED_AT, sessionsOf("ar->en", "live", 0));
+    const snap = c.snapshot(1000, CREATED_AT, sessionsOf("0:ar->en", "live", 0));
     expect(snap.e2eLatencyMs).toBeNull();
   });
 
@@ -104,9 +104,9 @@ describe("MetricsCollector: snapshot fields", () => {
 
   it("passes the sessions snapshot through untouched", () => {
     const c = new MetricsCollector();
-    const sessions = sessionsOf("ar->en", "live", 2);
+    const sessions = sessionsOf("0:ar->en", "live", 2);
     const snap = c.snapshot(1000, CREATED_AT, sessions);
-    expect(snap.sessions).toEqual([{ pair: "ar->en", status: "live", reconnects: 2 }]);
+    expect(snap.sessions).toEqual([{ pair: "0:ar->en", status: "live", reconnects: 2 }]);
   });
 
   it("returns integer rates (raw counts, no division)", () => {

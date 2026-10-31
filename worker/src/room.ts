@@ -13,13 +13,13 @@
 // never in a live instance.
 //
 // NOT in this task: translation sessions and metrics (T-008 owns the
-// SessionManager module, T-012 the metrics panel). Floor control (T-007) is
-// wired below: `routeControl` dispatches through the pure machine in
-// `floor.ts`, and the binary gate in `routeBinary` drops non-holder frames
-// (rule 6). Audio fan-out (T-009) lives in `routeBinary`/`fanoutAudio` below:
-// holder frames fan out through the per-room SessionManager, with
-// `applyFloorEffects` releasing refs on floor change and `webSocketClose`
-// releasing them on leave.
+// SessionManager module, T-012 the metrics panel). Mic control (T-007/T-028)
+// is wired below: `routeControl` dispatches through the pure machine in
+// `mic.ts`, and the binary gate in `routeBinary` drops closed-mic frames
+// (FR-012). Audio fan-out (T-009) lives in `routeBinary`/`fanoutAudio` below:
+// open-mic frames fan out through the per-room SessionManager as per-speaker
+// pipes, with `applyMicEffects` flushing/releasing refs on mic changes and
+// `webSocketClose` releasing them on leave.
 import {
   CodecError,
   decodeAudioFrame,
@@ -31,26 +31,29 @@ import {
   nextAudioSeq,
   splitPayloadForWire,
   type DecodedAudioFrame,
-  type FloorHolder,
   type Role,
   type RosterEntry,
   type ServerMsg,
 } from "@fitra/shared";
 import { verify, type JoinClaims } from "./auth/token.js";
 import {
-  applyFloorEvent,
-  initialFloorState,
-  type FloorEffect,
-  type FloorEvent,
-  type FloorResult,
-  type FloorState,
-} from "./floor.js";
+  applyMicControlRow,
+  applyMicEvent,
+  initialMicState,
+  isMicOpen,
+  micControlToRow,
+  type MicControlRow,
+  type MicEffect,
+  type MicEvent,
+  type MicResult,
+  type MicState,
+} from "./mic.js";
 import { FakeTranslationProvider } from "./translation/fake.js";
 import { GeminiTranslationProvider } from "./translation/gemini.js";
 import {
   DEFAULT_IDLE_CLOSE_MS,
   DEFAULT_MAX_SESSIONS,
-  pairKey,
+  pipeKey,
   SessionManager,
   type SessionStatus,
 } from "./translation/sessions.js";
@@ -97,10 +100,10 @@ type RejectCode =
   | "teacher-taken"
   | "room-full"
   | "room-closed"
-  | "not-implemented-floor"
   | "not-implemented-fanout"
-  | "not-your-floor"
-  | "grant-absent"
+  | "mic-closed"
+  | "mic-forced-muted"
+  | "mute-absent"
   | "rate-limited"
   | "frame-too-large"
   | "session-degraded"
@@ -137,6 +140,11 @@ interface IndexRow extends Record<string, SqlStorageValue> {
 
 interface SessionRow extends Record<string, SqlStorageValue> {
   readonly session: number;
+}
+
+interface MicControlSqlRow extends Record<string, SqlStorageValue> {
+  readonly mute_all_active: number;
+  readonly forced_muted: string;
 }
 
 interface LiveSocket {
@@ -198,8 +206,9 @@ function isRole(value: unknown): value is Role {
 
 function asRejectCode(code: string): RejectCode {
   switch (code) {
-    case "grant-absent":
-    case "not-your-floor":
+    case "mic-closed":
+    case "mic-forced-muted":
+    case "mute-absent":
     case "teacher-taken":
       return code;
     default:
@@ -207,19 +216,21 @@ function asRejectCode(code: string): RejectCode {
   }
 }
 
-function floorErrorMessage(
+function micErrorMessage(
   code: string,
   participantId: string | undefined,
 ): string {
   switch (code) {
-    case "grant-absent":
-      return `cannot grant ${participantId ?? "unknown"}: not waiting and holding no floor`;
-    case "not-your-floor":
-      return "sender holds no floor";
+    case "mic-forced-muted":
+      return "the teacher has muted you; you cannot open your mic";
+    case "mic-closed":
+      return `audio from ${participantId ?? "sender"} dropped: the mic is closed`;
+    case "mute-absent":
+      return `cannot mute ${participantId ?? "unknown"}: not a connected student`;
     case "teacher-taken":
       return "the room already has a teacher";
     default:
-      return `floor rejected: ${code}`;
+      return `mic control rejected: ${code}`;
   }
 }
 
@@ -227,13 +238,20 @@ export class ClassRoom {
   private readonly state: DurableObjectState;
   private readonly env: RoomEnv;
   /**
-   * Floor holder + FIFO hands, owned by the pure machine in floor.ts. Memory
-   * only: no SQLite writes on the control path (AGENTS.md rule 2,
-   * docs/LIMITS.md), so a hibernation eviction resets the floor to IDLE.
+   * Mic state (micOpen/forcedMuted per pid), owned by the pure machine in
+   * mic.ts. The force-mute policy (forcedMuted + muteAllActive) is persisted
+   * to the `mic_control` row so a hibernation wake reloads the teacher's mute
+   * latch; micOpen stays memory-only because an open mic streams frames
+   * continuously, which prevents hibernation. Still no per-audio/caption
+   * writes (AGENTS.md rule 2).
    */
-  private floorState: FloorState = initialFloorState();
-  /** Rule-6 violation counter: binary frames dropped from non-holders. */
-  private floorViolations = 0;
+  private micState: MicState = initialMicState();
+  /** mic_control row applied to this wake; load-once per isolate. */
+  private micControlLoaded = false;
+  /** Last persisted mic_control signature; skips no-op SQLite writes. */
+  private persistedMicControl: string | null = null;
+  /** Mic-gate violation counter: binary frames dropped from closed mics. */
+  private micViolations = 0;
   /**
    * Lazily created on the first holder frame: one SessionManager per room
    * (FR-020), shared across all `(source -> target)` pairs. Null means no
@@ -246,12 +264,14 @@ export class ClassRoom {
   private readonly controlStamps = new Map<string, number[]>();
   /** Consecutive over-rate audio drops per pid; an accepted frame resets it. */
   private readonly audioOverRuns = new Map<string, number>();
-  /** Audio drops outside rule 6 (decode errors, rate/size rejects). */
+  /** Audio drops outside the mic gate (decode errors, rate/size rejects). */
   private audioDrops = 0;
-  /** Outgoing speaker index per translation pair (type-0x02 header). */
-  private readonly pairSpeaker = new Map<string, number>();
-  /** Per-listener outgoing sequence counters for type-0x02 frames. */
-  private readonly outSeq = new Map<string, number>();
+  /**
+   * Per (listener pid, source speaker index) outgoing sequence counters for
+   * type-0x02 frames: parallel speaker pipes keep independent cursors so a
+   * client can demux by the downlink `speaker` field without fake loss.
+   */
+  private readonly outSeq = new Map<string, Map<number, number>>();
   /** T-020 counters: pure, timer-free; pulses ride real events only. */
   private readonly collector = new MetricsCollector();
   /** Re-entrancy guard: the metrics send's own recordOutbound must not pulse. */
@@ -272,6 +292,13 @@ export class ClassRoom {
           next_session INTEGER NOT NULL,
           teacher_lang TEXT,
           expired_at_ms INTEGER
+        );
+      `);
+      state.storage.sql.exec(`
+        CREATE TABLE IF NOT EXISTS mic_control (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          mute_all_active INTEGER NOT NULL,
+          forced_muted TEXT NOT NULL
         );
       `);
       state.storage.sql.exec(`
@@ -378,6 +405,7 @@ export class ClassRoom {
   ): Promise<void> {
     const member = this.memberOf(ws);
     if (member === null) return;
+    this.ensureMicControlLoaded();
     // Only the socket that owns the current membership row may evict it: a
     // rejoin bumps `session`, so the replaced socket's close is a no-op here.
     const row = this.state.storage.sql
@@ -397,16 +425,16 @@ export class ClassRoom {
       this.controlStamps.delete(member.pid);
       this.audioOverRuns.delete(member.pid);
       this.outSeq.delete(member.pid);
-      // Rows 3/4/10/11: a disconnect that held the floor (or the teacher, who
-      // pauses translation) broadcasts floor-changed{h:none}. The stale
-      // socket's close above stays a floor no-op too.
-      this.publishFloor(
-        applyFloorEvent(this.floorState, {
+      // A departure that was speaking broadcasts mic-changed{false}; the
+      // machine also clears their force-mute flag with the roster row.
+      this.publishMic(
+        applyMicEvent(this.micState, {
           type: "participantDisconnect",
           participantId: member.pid,
           isTeacher: member.role === "teacher",
         }),
         null,
+        member.index,
       );
     }
     this.syncRoster();
@@ -418,11 +446,11 @@ export class ClassRoom {
   /**
    * JSON control frames (docs/PROTOCOL.md section 3). Anything that is not a
    * valid `ClientMsg` gets `error{bad-message}` — never a silent drop.
-   * Floor frames are role-checked (grant/deny/revoke are teacher-only; a
-   * student `speaking-start` is only valid while holding a grant) and then
-   * dispatched through the pure floor machine in floor.ts.
+   * Mic frames are role-checked (mute/unmute/mute-all/unmute-all are
+   * teacher-only) and then dispatched through the pure machine in mic.ts.
    */
   private routeControl(ws: WebSocket, member: SocketMember, raw: string): void {
+    this.ensureMicControlLoaded();
     if (!this.checkControlRate(ws, member)) return;
     let parsed: unknown;
     try {
@@ -442,106 +470,54 @@ export class ClassRoom {
           JSON.stringify({ t: "pong", id: parsed.id } satisfies ServerMsg),
         );
         return;
-      case "speaking-start": {
-        if (member.role === "teacher") {
-          this.dispatchFloor(ws, { type: "teacherStart" });
-          return;
-        }
-        const holder = this.floorState.holder;
-        if (
-          holder.kind === "student" &&
-          holder.participantId === member.pid
-        ) {
-          return;
-        }
-        this.sendError(
-          ws,
-          "not-your-floor",
-          `speaking-start from ${member.pid} without a grant`,
-        );
-        return;
-      }
-      case "speaking-stop": {
-        if (member.role === "teacher") {
-          this.dispatchFloor(ws, { type: "teacherStop" });
-          return;
-        }
-        this.dispatchFloor(ws, {
-          type: "speakingStop",
+      case "mic-open":
+        this.dispatchMic(ws, {
+          type: "micOpen",
           participantId: member.pid,
+          isTeacher: member.role === "teacher",
         });
         return;
-      }
-      case "raise-hand": {
-        if (member.role !== "student") {
-          this.sendError(
-            ws,
-            "not-your-floor",
-            `raise-hand from ${member.pid}: only students raise hands`,
-          );
-          return;
-        }
-        this.dispatchFloor(ws, {
-          type: "raiseHand",
-          participantId: member.pid,
-        });
+      case "mic-close":
+        this.dispatchMic(ws, { type: "micClose", participantId: member.pid });
         return;
-      }
-      case "lower-hand": {
-        if (member.role !== "student") {
-          this.sendError(
-            ws,
-            "not-your-floor",
-            `lower-hand from ${member.pid}: only students hold hands`,
-          );
-          return;
-        }
-        this.dispatchFloor(ws, {
-          type: "lowerHand",
-          participantId: member.pid,
-        });
-        return;
-      }
-      case "grant": {
+      case "mute":
+      case "unmute": {
         if (member.role !== "teacher") {
           this.sendError(
             ws,
-            "not-your-floor",
-            `grant from ${member.pid}: only the teacher grants the floor`,
+            "bad-message",
+            `${parsed.t} from ${member.pid}: only the teacher controls mutes`,
           );
           return;
         }
-        this.dispatchFloor(ws, {
-          type: "grant",
+        if (!this.studentExists(parsed.participantId)) {
+          this.sendError(
+            ws,
+            "mute-absent",
+            micErrorMessage("mute-absent", parsed.participantId),
+          );
+          return;
+        }
+        this.dispatchMic(ws, {
+          type: parsed.t === "mute" ? "mute" : "unmute",
           participantId: parsed.participantId,
         });
         return;
       }
-      case "deny": {
+      case "mute-all":
+      case "unmute-all": {
         if (member.role !== "teacher") {
           this.sendError(
             ws,
-            "not-your-floor",
-            `deny from ${member.pid}: only the teacher denies hands`,
+            "bad-message",
+            `${parsed.t} from ${member.pid}: only the teacher controls mutes`,
           );
           return;
         }
-        this.dispatchFloor(ws, {
-          type: "deny",
-          participantId: parsed.participantId,
+        this.dispatchMic(ws, {
+          type: parsed.t === "mute-all" ? "muteAll" : "unmuteAll",
+          studentIds: this.studentIds(),
         });
-        return;
-      }
-      case "revoke": {
-        if (member.role !== "teacher") {
-          this.sendError(
-            ws,
-            "not-your-floor",
-            `revoke from ${member.pid}: only the teacher revokes the floor`,
-          );
-          return;
-        }
-        this.dispatchFloor(ws, { type: "revoke" });
         return;
       }
       default: {
@@ -571,48 +547,46 @@ export class ClassRoom {
     return true;
   }
 
-  /** Feed one role-checked control event into the floor machine and publish. */
-  private dispatchFloor(requester: WebSocket, event: FloorEvent): void {
-    this.publishFloor(applyFloorEvent(this.floorState, event), requester);
+  /** Feed one role-checked control event into the mic machine and publish. */
+  private dispatchMic(requester: WebSocket, event: MicEvent): void {
+    this.publishMic(applyMicEvent(this.micState, event), requester);
   }
 
   /**
    * Apply a machine result: adopt its state, translate session effects, and
-   * broadcast. `floor-changed`/`hands` go to every live socket; a machine
-   * `error` (grant-absent) answers the requester only. A null requester
-   * (disconnect path) drops machine errors — that path never produces them.
+   * broadcast. `mic-changed` and `roster` go to every live socket (roster as a
+   * per-socket `welcome` re-render); a machine `error` answers the requester
+   * only. A null requester (disconnect path) drops machine errors — that path
+   * never produces them.
    */
-  private publishFloor(
-    result: FloorResult,
+  private publishMic(
+    result: MicResult,
     requester: WebSocket | null,
+    disconnectIndex?: number,
   ): void {
-    this.floorState = result.state;
-    this.applyFloorEffects(result.effects);
+    this.micState = result.state;
+    this.applyMicEffects(result.effects, disconnectIndex);
+    this.persistMicControl();
     for (const broadcast of result.broadcasts) {
       switch (broadcast.type) {
-        case "floor-changed": {
+        case "mic-changed": {
           const msg = JSON.stringify({
-            t: "floor-changed",
-            floor: broadcast.floor,
-            reason: broadcast.reason,
+            t: "mic-changed",
+            participantId: broadcast.participantId,
+            micOpen: broadcast.micOpen,
           } satisfies ServerMsg);
           for (const { ws } of this.liveSockets()) this.trySend(ws, msg);
           break;
         }
-        case "hands": {
-          const msg = JSON.stringify({
-            t: "hands",
-            raised: broadcast.raised,
-          } satisfies ServerMsg);
-          for (const { ws } of this.liveSockets()) this.trySend(ws, msg);
+        case "roster":
+          this.syncRoster();
           break;
-        }
         case "error": {
           if (requester !== null) {
             this.sendError(
               requester,
               asRejectCode(broadcast.code),
-              floorErrorMessage(
+              micErrorMessage(
                 broadcast.code,
                 broadcast.participantId ?? broadcast.to,
               ),
@@ -629,29 +603,35 @@ export class ClassRoom {
   }
 
   /**
-   * Translate machine session effects into SessionManager calls. Listener refs
-   * are per-participant, so a departing speaker drops theirs; a full release
-   * tears the manager down (next holder frame rebuilds it lazily).
+   * Translate machine session effects into SessionManager calls. Pipe refs
+   * are per-(speaker, listener), so a forced cut releases the speaker's whole
+   * pipe set and a voluntary close releases it right after the flush (the
+   * already-translating tail drains through the idle window).
+   *
+   * `forcedIndex` overrides pid→index resolution for every effect in the
+   * batch: on disconnect the membership row is already deleted, and a lookup
+   * would fall back to the teacher's index 0 — releasing the teacher's pipes
+   * instead of the departed speaker's.
    */
-  private applyFloorEffects(effects: readonly FloorEffect[]): void {
+  private applyMicEffects(
+    effects: readonly MicEffect[],
+    forcedIndex?: number,
+  ): void {
     for (const effect of effects) {
       switch (effect.kind) {
-        case "releaseSessionsFor":
-          this.sessions?.endInputAll();
-          this.sessions?.release(effect.participantId);
+        case "flushSpeaker":
+          this.sessions?.flushSpeaker(
+            forcedIndex ?? this.memberIndexOf(effect.participantId),
+          );
           break;
-        case "releaseAllSessions": {
-          const torn = this.sessions;
-          this.sessions = null;
-          void torn?.closeAll();
-          break;
-        }
-        case "pauseTranslation":
-        case "resumeTranslation":
+        case "closeSpeakerPipes":
+          this.sessions?.closeSpeakerPipes(
+            forcedIndex ?? this.memberIndexOf(effect.participantId),
+          );
           break;
         case "ensureSession":
-          // Floor grant opens the pair set eagerly so the first spoken frame
-          // does not pay the session-opening gap (PROTOCOL section 4.1).
+          // Mic-open opens the speaker's pipe set eagerly so the first
+          // spoken frame does not pay the session-opening gap (PROTOCOL 4.1).
           this.prewarmSessions(effect.source);
           break;
         default: {
@@ -663,32 +643,130 @@ export class ClassRoom {
   }
 
   /**
-   * Binary frames are audio (docs/PROTOCOL.md section 2). Rule 6 gates them on
-   * the floor holder: frames from anyone else are dropped, counted, and
-   * answered with `error{not-your-floor}`. Holder frames are rate/size
-   * checked, decoded (header only — payload is never parsed), and fanned out:
-   * same-language listeners get a 24 kHz type-0x02 re-wrap of the frame
-   * (FR-021, no session — the 16 kHz uplink payload is linearly upsampled so
-   * the PROTOCOL section 2 "24 kHz output" contract holds for every listener
-   * frame), every other language group shares one SessionManager pair
-   * (FR-020/022/023), and the speaker is always excluded (FR-015).
+   * Reload the persisted force-mute policy after a hibernation wake.
+   * Load-once per isolate and idempotent; called before the first mic
+   * mutation on every public entry (join, control, disconnect).
+   */
+  private ensureMicControlLoaded(): void {
+    if (this.micControlLoaded) return;
+    this.micControlLoaded = true;
+    const row = this.state.storage.sql
+      .exec<MicControlSqlRow>(
+        "SELECT mute_all_active, forced_muted FROM mic_control WHERE id = 1",
+      )
+      .toArray()[0];
+    if (row === undefined) {
+      this.persistedMicControl = "0:[]";
+      return;
+    }
+    let forced: string[] = [];
+    try {
+      const parsed: unknown = JSON.parse(String(row.forced_muted));
+      if (Array.isArray(parsed)) {
+        forced = parsed.filter((p): p is string => typeof p === "string");
+      }
+    } catch {
+      // corrupt persisted row: fall back to the empty policy
+    }
+    const control: MicControlRow = {
+      muteAllActive: row.mute_all_active !== 0,
+      forcedPids: forced,
+    };
+    this.micState = applyMicControlRow(this.micState, control);
+    this.persistedMicControl = `${control.muteAllActive ? 1 : 0}:${
+      JSON.stringify(control.forcedPids)
+    }`;
+  }
+
+  /** Persist the force-mute policy; skips the write when nothing changed. */
+  private persistMicControl(): void {
+    const row = micControlToRow(this.micState);
+    const sig = `${row.muteAllActive ? 1 : 0}:${JSON.stringify(row.forcedPids)}`;
+    if (this.persistedMicControl === sig) return;
+    this.state.storage.sql.exec(
+      `INSERT INTO mic_control (id, mute_all_active, forced_muted)
+       VALUES (1, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         mute_all_active = excluded.mute_all_active,
+         forced_muted = excluded.forced_muted`,
+      row.muteAllActive ? 1 : 0,
+      JSON.stringify(row.forcedPids),
+    );
+    this.persistedMicControl = sig;
+  }
+
+  /** Student pid -> join-language rows are the roster; these helpers read the
+   * live membership table (cached until any row changes). */
+  private studentIds(): string[] {
+    const ids: string[] = [];
+    for (const [pid, role] of this.memberRoles()) {
+      if (role === "student") ids.push(pid);
+    }
+    return ids;
+  }
+
+  private studentExists(pid: string): boolean {
+    return this.memberRoles().get(pid) === "student";
+  }
+
+  private memberRolesCache: Map<string, Role> | null = null;
+
+  private invalidateMemberLangs(): void {
+    this.memberLangsCache = null;
+    this.memberRolesCache = null;
+  }
+
+  private memberRoles(): Map<string, Role> {
+    const cached = this.memberRolesCache;
+    if (cached !== null) return cached;
+    const roles = new Map<string, Role>();
+    for (const row of this.state.storage.sql
+      .exec<MemberRow>("SELECT participant_id, role FROM membership")
+      .toArray()) {
+      if (isRole(row.role)) roles.set(row.participant_id, row.role);
+    }
+    this.memberRolesCache = roles;
+    return roles;
+  }
+
+  /** participantIndex for a membership row; 0 (teacher) when unknown. */
+  private memberIndexOf(pid: string): number {
+    const row = this.state.storage.sql
+      .exec<IndexRow & { participant_id: string }>(
+        "SELECT participant_index, participant_id FROM membership WHERE participant_id = ?",
+        pid,
+      )
+      .toArray()[0];
+    return row?.participant_index ?? TEACHER_INDEX;
+  }
+
+  /**
+   * Binary frames are audio (docs/PROTOCOL.md section 2). The mic gate
+   * (FR-012) requires an open mic: frames from a closed mic are dropped,
+   * counted, and answered with `error{mic-closed}`. Open-mic frames are
+   * rate/size checked, decoded (header only — payload is never parsed), and
+   * fanned out: same-language listeners get a 24 kHz type-0x02 re-wrap of the
+   * frame (FR-021, no session — the 16 kHz uplink payload is linearly
+   * upsampled so the PROTOCOL section 2 "24 kHz output" contract holds for
+   * every listener frame), every other language group shares one
+   * SessionManager pipe (FR-020/022/023), and the speaker is always excluded
+   * (FR-015).
    */
   private routeBinary(
     ws: WebSocket,
     member: SocketMember,
     frame: ArrayBuffer,
   ): void {
-    const gate = applyFloorEvent(this.floorState, {
+    const gate = applyMicEvent(this.micState, {
       type: "audioFrame",
       participantId: member.pid,
-      isTeacher: member.role === "teacher",
     });
     if (gate.broadcasts.length > 0) {
-      this.floorViolations += 1;
+      this.micViolations += 1;
       this.sendError(
         ws,
-        "not-your-floor",
-        `audio from ${member.pid} dropped: the floor is elsewhere (violation ${this.floorViolations})`,
+        "mic-closed",
+        `audio from ${member.pid} dropped: the mic is closed (violation ${this.micViolations})`,
       );
       return;
     }
@@ -777,23 +855,17 @@ export class ClassRoom {
       onSessionStatus: (pair, status, attempt) => {
         this.broadcastSessionStatus(pair, status, attempt);
       },
-      onAudio: (pair, pcm) => {
-        this.forwardTranslated(pair, pcm);
+      onAudio: (pair, speakerIndex, pcm) => {
+        this.forwardTranslated(pair, speakerIndex, pcm);
       },
-      onTranscript: (pair, kind, text, final) => {
-        this.broadcastCaption(pair, kind, text, final);
+      onTranscript: (pair, speakerIndex, kind, text, final) => {
+        this.broadcastCaption(pair, speakerIndex, kind, text, final);
       },
     });
     return this.sessions;
   }
 
   private memberLangsCache: Map<string, string> | null = null;
-
-  /** Fan-out used to re-query membership per 100 ms frame (and again per
-   * translated chunk, 2 SQLite reads/frame); cached until any row changes. */
-  private invalidateMemberLangs(): void {
-    this.memberLangsCache = null;
-  }
 
   /** pid -> join language for every membership row (read-only, no writes). */
   private memberLangs(): Map<string, string> {
@@ -809,11 +881,11 @@ export class ClassRoom {
   }
 
   private fanoutAudio(
-    holder: SocketMember,
+    speaker: SocketMember,
     decoded: DecodedAudioFrame,
   ): void {
     const langs = this.memberLangs();
-    const sourceLang = langs.get(holder.pid);
+    const sourceLang = langs.get(speaker.pid);
     if (sourceLang === undefined) {
       this.audioDrops += 1;
       return;
@@ -824,16 +896,16 @@ export class ClassRoom {
       payload.byteOffset,
       payload.byteOffset + payload.byteLength,
     ) as ArrayBuffer;
-    // Group translation listeners per pair: a pair's uplink must be fed ONCE
+    // Group translation listeners per pipe: a pipe's uplink must be fed ONCE
     // per frame regardless of listener count — feeding it once per listener
     // garbles streaming transcription and multiplies speaker turns.
     const membersByLang = new Map<string, LiveSocket[]>();
     for (const entry of this.liveSockets()) {
-      if (entry.member.pid === holder.pid) continue;
+      if (entry.member.pid === speaker.pid) continue;
       const targetLang = langs.get(entry.member.pid);
       if (targetLang === undefined) continue;
       if (targetLang === sourceLang) {
-        this.relayAudio(entry, holder, payload);
+        this.relayAudio(entry, speaker, payload);
         continue;
       }
       const group = membersByLang.get(targetLang);
@@ -854,13 +926,16 @@ export class ClassRoom {
       return;
     }
     for (const [targetLang, group] of membersByLang) {
-      const pair = pairKey(sourceLang, targetLang);
-      this.pairSpeaker.set(pair, holder.index);
+      const pair = pipeKey(speaker.index, sourceLang, targetLang);
       let feed: TranslationSession | null = null;
       for (const { ws, member } of group) {
-        const acquired = manager.acquire(sourceLang, targetLang, member.pid, {
-          isTeacherLeg: member.role === "teacher",
-        });
+        const acquired = manager.acquire(
+          speaker.index,
+          sourceLang,
+          targetLang,
+          member.pid,
+          { isTeacherLeg: member.role === "teacher" },
+        );
         if (acquired.degraded) {
           this.sendError(
             ws,
@@ -877,14 +952,14 @@ export class ClassRoom {
 
   private relayAudio(
     { ws, member }: Pick<LiveSocket, "ws" | "member">,
-    holder: SocketMember,
+    speaker: SocketMember,
     payload: Uint8Array,
   ): void {
     // Same-language relay (FR-021, no translation session): the uplink
     // payload is 16 kHz, but DO->client frames are 24 kHz (PROTOCOL
     // section 2), so resample and re-wrap as type-0x02 with this
-    // listener's own downlink sequence. Relaying the raw uplink bytes
-    // played 16 kHz samples at 24 kHz on the listener (1.5x speed,
+    // listener's own per-pipe downlink sequence. Relaying the raw uplink
+    // bytes played 16 kHz samples at 24 kHz on the listener (1.5x speed,
     // raised pitch, choppy buffering).
     const upsampled = upsample16kTo24kMono(payload);
     if (upsampled.length === 0) return;
@@ -892,14 +967,14 @@ export class ClassRoom {
     // the codec rejects as frame-too-large. Split exactly like translated
     // audio so large same-language frames are not silently dropped.
     const pieces = splitPayloadForWire(upsampled);
-    let seq = this.outSeq.get(member.pid) ?? 0;
+    let seq = this.outSeqFor(member.pid, speaker.index);
     for (const piece of pieces) {
       let relay: Uint8Array;
       try {
         relay = encodeAudioFrame({
           type: FITRA_AUDIO_TYPE_DOWNLINK,
           seq,
-          speaker: holder.index,
+          speaker: speaker.index,
           payload: piece,
         });
       } catch {
@@ -909,58 +984,69 @@ export class ClassRoom {
       seq = nextAudioSeq(seq);
       this.trySend(ws, relay);
     }
-    this.outSeq.set(member.pid, seq);
+    this.storeOutSeq(member.pid, speaker.index, seq);
   }
 
-  /** Floor grants open the pair set eagerly (ensureSession effect) so the
-   * first spoken frame does not pay the session-opening gap. Acquire is
-   * idempotent per listener pid, so refs here match the per-frame path. */
-  private prewarmSessions(sourceRef: string): void {
+  private outSeqFor(listenerPid: string, speakerIndex: number): number {
+    return this.outSeq.get(listenerPid)?.get(speakerIndex) ?? 0;
+  }
+
+  private storeOutSeq(
+    listenerPid: string,
+    speakerIndex: number,
+    seq: number,
+  ): void {
+    const perSpeaker = this.outSeq.get(listenerPid) ?? new Map<number, number>();
+    perSpeaker.set(speakerIndex, seq);
+    this.outSeq.set(listenerPid, perSpeaker);
+  }
+
+  /** Mic-open pre-warms the speaker's pipe set eagerly (ensureSession effect)
+   * so the first spoken frame does not pay the session-opening gap. Acquire
+   * is idempotent per listener pid, so refs here match the per-frame path. */
+  private prewarmSessions(sourcePid: string): void {
     const manager = this.ensureSessions();
     if (manager === null) return;
     const langs = this.memberLangs();
-    let sourcePid = sourceRef;
-    if (sourceRef === "teacher") {
-      const teacher = this.liveSockets().find(
-        (entry) => entry.member.role === "teacher",
-      );
-      if (teacher === undefined) return;
-      sourcePid = teacher.member.pid;
-    }
     const sourceLang = langs.get(sourcePid);
     if (sourceLang === undefined) return;
+    const speakerIndex = this.memberIndexOf(sourcePid);
     for (const { member } of this.liveSockets()) {
       if (member.pid === sourcePid) continue;
       const targetLang = langs.get(member.pid);
       if (targetLang === undefined || targetLang === sourceLang) continue;
-      manager.acquire(sourceLang, targetLang, member.pid, {
+      manager.acquire(speakerIndex, sourceLang, targetLang, member.pid, {
         isTeacherLeg: member.role === "teacher",
       });
     }
   }
 
-  /** Wrap provider output in type-0x02 frames, one sequence per listener.
-   * Provider chunks are arbitrarily sized (a Gemini turn dwarfs one 100 ms
-   * frame), so split them first: oversize payloads used to die silently in
-   * the codec's `frame-too-large` rejection, muting translation entirely. */
-  private forwardTranslated(pair: string, pcm: ArrayBuffer): void {
+  /** Wrap provider output in type-0x02 frames, one sequence per (listener,
+   * speaker) pipe. Provider chunks are arbitrarily sized (a Gemini turn
+   * dwarfs one 100 ms frame), so split them first: oversize payloads used to
+   * die silently in the codec's `frame-too-large` rejection, muting
+   * translation entirely. */
+  private forwardTranslated(
+    pair: string,
+    speakerIndex: number,
+    pcm: ArrayBuffer,
+  ): void {
     const sep = pair.indexOf("->");
     if (sep < 0) return;
     const targetLang = pair.slice(sep + 2);
-    const speaker = this.pairSpeaker.get(pair) ?? TEACHER_INDEX;
     const langs = this.memberLangs();
     const pieces = splitPayloadForWire(new Uint8Array(pcm));
     if (pieces.length === 0) return;
     for (const { ws, member } of this.liveSockets()) {
       if (langs.get(member.pid) !== targetLang) continue;
-      let seq = this.outSeq.get(member.pid) ?? 0;
+      let seq = this.outSeqFor(member.pid, speakerIndex);
       for (const piece of pieces) {
         let frame: Uint8Array;
         try {
           frame = encodeAudioFrame({
             type: FITRA_AUDIO_TYPE_DOWNLINK,
             seq,
-            speaker,
+            speaker: speakerIndex,
             payload: piece,
           });
         } catch {
@@ -970,7 +1056,7 @@ export class ClassRoom {
         seq = nextAudioSeq(seq);
         this.trySend(ws, frame);
       }
-      this.outSeq.set(member.pid, seq);
+      this.storeOutSeq(member.pid, speakerIndex, seq);
     }
   }
 
@@ -992,13 +1078,14 @@ export class ClassRoom {
   }
 
   /**
-   * PROTOCOL section 3.1 caption routing: both caption kinds go to the pair's
-   * target-language members and to the pair's source speaker, so the sender
+   * PROTOCOL section 3.1 caption routing: both caption kinds go to the pipe's
+   * target-language members and to the pipe's source speaker, so the sender
    * sees their own original and translated text. Same-language non-speakers
-   * stay excluded because a pair's target always differs from its source.
+   * stay excluded because a pipe's target always differs from its source.
    */
   private broadcastCaption(
     pair: string,
+    speakerIndex: number,
     kind: "input" | "output",
     text: string,
     final: boolean,
@@ -1006,18 +1093,20 @@ export class ClassRoom {
     const sep = pair.indexOf("->");
     if (sep < 0) return;
     const targetLang = pair.slice(sep + 2);
-    const speaker = this.pairSpeaker.get(pair) ?? TEACHER_INDEX;
     const langs = this.memberLangs();
     const msg = JSON.stringify({
       t: "caption",
       kind,
       text,
       final,
+      speaker: speakerIndex,
     } satisfies ServerMsg);
     for (const { ws, member } of this.liveSockets()) {
       const lang = langs.get(member.pid);
       if (lang === undefined) continue;
-      if (lang === targetLang || member.index === speaker) this.trySend(ws, msg);
+      if (lang === targetLang || member.index === speakerIndex) {
+        this.trySend(ws, msg);
+      }
     }
   }
 
@@ -1064,24 +1153,16 @@ export class ClassRoom {
     }
   }
 
-  // --- floor seams for T-007 ---------------------------------------------
+  // --- mic seams for T-007/T-028 ------------------------------------------
 
-  /** Observability hook for T-012 metrics: rule-6 drops so far. */
-  getFloorViolations(): number {
-    return this.floorViolations;
+  /** Observability hook for T-012 metrics: mic-gate drops so far. */
+  getMicViolations(): number {
+    return this.micViolations;
   }
 
-  /** Observability hook for T-012 metrics: audio drops outside rule 6. */
+  /** Observability hook for T-012 metrics: audio drops outside the mic gate. */
   getAudioDrops(): number {
     return this.audioDrops;
-  }
-
-  private currentFloor(): FloorHolder {
-    return this.floorState.holder;
-  }
-
-  private currentRaisedHands(): string[] {
-    return [...this.floorState.raised];
   }
 
   // --- membership ---------------------------------------------------------
@@ -1206,9 +1287,12 @@ export class ClassRoom {
       if (!isRole(row.role)) continue;
       roster.push({
         participantId: row.participant_id,
+        participantIndex: row.participant_index,
         name: row.name,
         role: row.role,
         lang: row.lang,
+        micOpen: isMicOpen(this.micState, row.participant_id),
+        forcedMuted: this.micState.forcedMuted.has(row.participant_id),
       });
     }
     return roster;
@@ -1302,7 +1386,20 @@ export class ClassRoom {
   // --- socket wiring ------------------------------------------------------
 
   private acceptJoin(member: SocketMember, replaces: WebSocket | null): Response {
-    if (replaces !== null) replaces.close(CLOSE_NORMAL, "rejoined");
+    this.ensureMicControlLoaded();
+    if (replaces !== null) {
+      // Socket replacement: the person never left, so force-mute flags stay,
+      // but the live capture belonged to the replaced socket — its pipes flush
+      // and idle-close while the new socket starts with the mic closed.
+      this.publishMic(
+        applyMicEvent(this.micState, {
+          type: "socketReplaced",
+          participantId: member.pid,
+        }),
+        null,
+      );
+      replaces.close(CLOSE_NORMAL, "rejoined");
+    }
     const [client, server] = Object.values(new WebSocketPair()) as [
       WebSocket,
       WebSocket,
@@ -1310,27 +1407,31 @@ export class ClassRoom {
     this.state.acceptWebSocket(server);
     server.serializeAttachment({ ...member });
     if (member.role === "teacher") {
-      this.publishFloor(
-        applyFloorEvent(this.floorState, {
+      this.publishMic(
+        applyMicEvent(this.micState, {
           type: replaces !== null ? "teacherRejoin" : "teacherJoin",
+        }),
+        server,
+      );
+    } else {
+      // Admission hook first: a mute-all latch force-mutes the newcomer
+      // before their welcome renders the roster flags.
+      this.publishMic(
+        applyMicEvent(this.micState, {
+          type: "studentJoin",
+          participantId: member.pid,
         }),
         server,
       );
     }
 
-    server.send(
+    this.trySend(
+      server,
       JSON.stringify({
         t: "welcome",
         participantId: member.pid,
         participantIndex: member.index,
-        floor: this.currentFloor(),
         roster: this.loadRoster(),
-      } satisfies ServerMsg),
-    );
-    server.send(
-      JSON.stringify({
-        t: "hands",
-        raised: this.currentRaisedHands(),
       } satisfies ServerMsg),
     );
     // The newcomer already has the freshest roster; only the existing members
@@ -1356,7 +1457,10 @@ export class ClassRoom {
       WebSocket,
     ];
     server.accept();
-    server.send(JSON.stringify({ t: "error", code, message } satisfies ServerMsg));
+    this.trySend(
+      server,
+      JSON.stringify({ t: "error", code, message } satisfies ServerMsg),
+    );
     server.close(CLOSE_NORMAL, code);
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -1364,7 +1468,6 @@ export class ClassRoom {
   /** Re-send every connected client (except `except`) its identity plus the roster. */
   private syncRoster(except?: WebSocket): void {
     const roster = this.loadRoster();
-    const floor = this.currentFloor();
     for (const { ws, member } of this.liveSockets()) {
       if (except !== undefined && ws === except) continue;
       // A replaced socket can still enumerate as live until its close event
@@ -1375,7 +1478,6 @@ export class ClassRoom {
           t: "welcome",
           participantId: member.pid,
           participantIndex: member.index,
-          floor,
           roster,
         } satisfies ServerMsg),
       );

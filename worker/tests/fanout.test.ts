@@ -2,8 +2,8 @@
 //
 // Teacher (ar) speaks -> en + fr students receive type-0x02 translated frames,
 // a second ar student receives the byte-identical original relay, and the
-// speaker never hears their own speech (FR-015). Non-holder frames are gated
-// (rule 6), over-rate frames are dropped, oversize frames are rejected, and
+// speaker never hears their own speech (FR-015). Closed-mic frames are gated
+// (FR-012), over-rate frames are dropped, oversize frames are rejected, and
 // undecodable frames are dropped without killing the room.
 import { env } from "cloudflare:test";
 import {
@@ -187,11 +187,10 @@ async function connect(room: string, join: Join): Promise<Inbox> {
   return new Inbox(ws);
 }
 
-async function drainWelcomeAndHands(inbox: Inbox, welcomes: number): Promise<void> {
+async function drainWelcome(inbox: Inbox, welcomes: number): Promise<void> {
   for (let i = 0; i < welcomes; i += 1) {
     await inbox.nextOfType("welcome");
   }
-  await inbox.nextOfType("hands");
 }
 
 /** Teacher (ar) + en/fr/ar students, all join frames drained. */
@@ -207,7 +206,7 @@ async function quartet(room: string): Promise<{
     lang: "ar",
     name: "Layla",
   });
-  await drainWelcomeAndHands(teacher, 1);
+  await drainWelcome(teacher, 1);
   const sEn = await connect(room, {
     pid: "s-en",
     role: "student",
@@ -215,7 +214,7 @@ async function quartet(room: string): Promise<{
     name: "Marco",
   });
   await teacher.nextOfType("welcome");
-  await drainWelcomeAndHands(sEn, 1);
+  await drainWelcome(sEn, 1);
   const sFr = await connect(room, {
     pid: "s-fr",
     role: "student",
@@ -224,7 +223,7 @@ async function quartet(room: string): Promise<{
   });
   await teacher.nextOfType("welcome");
   await sEn.nextOfType("welcome");
-  await drainWelcomeAndHands(sFr, 1);
+  await drainWelcome(sFr, 1);
   const sAr2 = await connect(room, {
     pid: "s-ar2",
     role: "student",
@@ -234,26 +233,22 @@ async function quartet(room: string): Promise<{
   await teacher.nextOfType("welcome");
   await sEn.nextOfType("welcome");
   await sFr.nextOfType("welcome");
-  await drainWelcomeAndHands(sAr2, 1);
+  await drainWelcome(sAr2, 1);
   return { teacher, sEn, sFr, sAr2 };
 }
 
-async function teacherTakesFloor(
+async function teacherOpensMic(
   teacher: Inbox,
   sEn: Inbox,
   sFr: Inbox,
   sAr2: Inbox,
 ): Promise<void> {
-  teacher.ws.send(JSON.stringify({ t: "speaking-start" }));
-  const changed = await teacher.nextOfType("floor-changed");
-  expect(changed).toEqual({
-    t: "floor-changed",
-    floor: { kind: "teacher" },
-    reason: "teacher-start",
-  });
-  expect(await sEn.nextOfType("floor-changed")).toEqual(changed);
-  expect(await sFr.nextOfType("floor-changed")).toEqual(changed);
-  expect(await sAr2.nextOfType("floor-changed")).toEqual(changed);
+  teacher.ws.send(JSON.stringify({ t: "mic-open" }));
+  const changed = { t: "mic-changed", participantId: "t", micOpen: true };
+  expect(await teacher.nextOfType("mic-changed")).toEqual(changed);
+  expect(await sEn.nextOfType("mic-changed")).toEqual(changed);
+  expect(await sFr.nextOfType("mic-changed")).toEqual(changed);
+  expect(await sAr2.nextOfType("mic-changed")).toEqual(changed);
 }
 
 function uplinkFrame(seq: number, payload: Uint8Array): Uint8Array {
@@ -284,28 +279,21 @@ async function connectAll(room: string, joins: Join[]): Promise<Inbox[]> {
   const inboxes: Inbox[] = [];
   for (const join of joins) {
     const inbox = await connect(room, join);
-    await drainWelcomeAndHands(inbox, 1);
+    await drainWelcome(inbox, 1);
     for (const prev of inboxes) await prev.nextOfType("welcome");
     inboxes.push(inbox);
   }
   return inboxes;
 }
 
-async function teacherTakesFloorOn(
-  inboxes: Inbox[],
-  reason = "teacher-start",
-): Promise<void> {
+async function teacherOpensMicOn(inboxes: Inbox[]): Promise<void> {
   const teacher = inboxes[0];
   if (teacher === undefined) throw new Error("no teacher inbox");
-  teacher.ws.send(JSON.stringify({ t: "speaking-start" }));
-  const changed = await teacher.nextOfType("floor-changed");
-  expect(changed).toEqual({
-    t: "floor-changed",
-    floor: { kind: "teacher" },
-    reason,
-  });
+  teacher.ws.send(JSON.stringify({ t: "mic-open" }));
+  const changed = { t: "mic-changed", participantId: "t", micOpen: true };
+  expect(await teacher.nextOfType("mic-changed")).toEqual(changed);
   for (const other of inboxes.slice(1)) {
-    expect(await other.nextOfType("floor-changed")).toEqual(changed);
+    expect(await other.nextOfType("mic-changed")).toEqual(changed);
   }
 }
 
@@ -345,9 +333,9 @@ describe("pair-fanout dedupe, pre-warm, captions, rejoin (latency/quality M0.5)"
     if (teacher === undefined || sEn1 === undefined || sEn2 === undefined || sFr === undefined) {
       throw new Error("missing inboxes");
     }
-    await teacherTakesFloorOn([teacher, sEn1, sEn2, sFr]);
+    await teacherOpensMicOn([teacher, sEn1, sEn2, sFr]);
 
-    // 4 frames: pre-warmed at grant, every frame must reach the pair feed
+    // 4 frames: pre-warmed at mic-open, every frame must reach the pair feed
     // exactly once -> 4 echoes per listener. Bug shape: 2 en listeners double
     // feed ar->en (6 echoes) while fr gets 3.
     const payload = new Uint8Array(160).fill(0x77);
@@ -362,14 +350,14 @@ describe("pair-fanout dedupe, pre-warm, captions, rejoin (latency/quality M0.5)"
     await sEn2.quietBinary();
   });
 
-  it("pre-warms sessions at floor grant: session-status arrives before any audio", async () => {
+  it("pre-warms sessions at mic-open: session-status arrives before any audio", async () => {
     const room = freshRoom();
     const { teacher, sEn, sFr, sAr2 } = await quartet(room);
-    await teacherTakesFloor(teacher, sEn, sFr, sAr2);
+    await teacherOpensMic(teacher, sEn, sFr, sAr2);
 
-    // No audio frames were sent: the grant itself must open the pairs. Pair
-    // statuses interleave arbitrarily on every inbox, so scan until the pair
-    // matches instead of assuming an order.
+    // No audio frames were sent: the mic-open itself must open the pipes.
+    // Pair statuses interleave arbitrarily on every inbox, so scan until the
+    // pair matches instead of assuming an order.
     async function statusFor(
       inbox: Inbox,
       pair: string,
@@ -380,15 +368,15 @@ describe("pair-fanout dedupe, pre-warm, captions, rejoin (latency/quality M0.5)"
       }
       throw new Error(`no session-status for ${pair}`);
     }
-    const enStatus = await statusFor(sEn, "ar->en");
+    const enStatus = await statusFor(sEn, "0:ar->en");
     expect(["connecting", "live"]).toContain(enStatus.status);
-    await statusFor(sFr, "ar->fr");
+    await statusFor(sFr, "0:ar->fr");
   });
 
   it("routes captions: both kinds to target-lang members and the speaker, never same-lang listeners", async () => {
     const room = freshRoom();
     const { teacher, sEn, sFr, sAr2 } = await quartet(room);
-    await teacherTakesFloor(teacher, sEn, sFr, sAr2);
+    await teacherOpensMic(teacher, sEn, sFr, sAr2);
 
     const payload = new Uint8Array(160).fill(0x66);
     for (let i = 0; i < 3; i += 1) {
@@ -415,7 +403,7 @@ describe("pair-fanout dedupe, pre-warm, captions, rejoin (latency/quality M0.5)"
     expect(captionsOf(sFr).some((c) => c.kind === "output")).toBe(true);
   });
 
-  it("teacher socket replacement keeps membership and floor (teacherRejoin, no teacher-taken)", async () => {
+  it("teacher socket replacement keeps membership and mic state (no teacher-taken)", async () => {
     const room = freshRoom();
     const teacherJoin: Join = {
       pid: "t",
@@ -430,24 +418,18 @@ describe("pair-fanout dedupe, pre-warm, captions, rejoin (latency/quality M0.5)"
     if (t1 === undefined || sEn === undefined) throw new Error("missing inboxes");
 
     const t2 = await connect(room, teacherJoin);
-    // teacherRejoin's floor-changed broadcast precedes the welcome frame, so
-    // read it BEFORE drainWelcomeAndHands (nextOfType would skip past it).
-    const changed = await t2.nextOfType("floor-changed");
-    expect(changed.reason).toBe("teacher-rejoin");
-    await drainWelcomeAndHands(t2, 1);
+    // The replacement keeps every person-level flag: socketReplaced closes
+    // the old capture silently (the teacher mic was never open) and the DO
+    // re-syncs the roster, so both sockets get a welcome.
+    await t2.nextOfType("welcome");
+    await sEn.nextOfType("welcome");
 
     expect(
       t2.text.filter((m) => m.t === "error" && m.code === "teacher-taken"),
     ).toEqual([]);
 
-    // sEn receives the same teacher-rejoin floor sync; drain it so the next
-    // floor-changed it observes is the floor grant itself.
-    expect((await sEn.nextOfType("floor-changed")).reason).toBe(
-      "teacher-rejoin",
-    );
-
     // Membership row survived the replaced socket's close: translation flows.
-    await teacherTakesFloorOn([t2, sEn]);
+    await teacherOpensMicOn([t2, sEn]);
     const payload = new Uint8Array(160).fill(0x88);
     for (let i = 0; i < 4; i += 1) {
       t2.ws.send(uplinkFrame(i, payload));
@@ -461,7 +443,7 @@ describe("ClassRoom audio fan-out (T-009, FR-015/020..025)", () => {
   it("en+fr students receive translated frames when the ar teacher speaks", async () => {
     const room = freshRoom();
     const { teacher, sEn, sFr, sAr2 } = await quartet(room);
-    await teacherTakesFloor(teacher, sEn, sFr, sAr2);
+    await teacherOpensMic(teacher, sEn, sFr, sAr2);
 
     // The first frame opens the provider sessions (open gap drops audio by
     // design); the frames after it must be translated and fanned out.
@@ -496,7 +478,7 @@ describe("ClassRoom audio fan-out (T-009, FR-015/020..025)", () => {
   it("the teacher receives nothing of their own speech (FR-015)", async () => {
     const room = freshRoom();
     const { teacher, sEn, sFr, sAr2 } = await quartet(room);
-    await teacherTakesFloor(teacher, sEn, sFr, sAr2);
+    await teacherOpensMic(teacher, sEn, sFr, sAr2);
 
     const payload = new Uint8Array(160).fill(0xab);
     const expected = upsample16kTo24kMono(payload);
@@ -513,7 +495,7 @@ describe("ClassRoom audio fan-out (T-009, FR-015/020..025)", () => {
   it("a same-language second ar student gets a 24 kHz type-0x02 re-wrap", async () => {
     const room = freshRoom();
     const { teacher, sEn, sFr, sAr2 } = await quartet(room);
-    await teacherTakesFloor(teacher, sEn, sFr, sAr2);
+    await teacherOpensMic(teacher, sEn, sFr, sAr2);
 
     // 80 samples of constant 0x5a5a: linear upsampling of a constant is the
     // same constant, 80 * 24/16 = 120 samples = 240 bytes.
@@ -550,7 +532,7 @@ describe("ClassRoom audio fan-out (T-009, FR-015/020..025)", () => {
   it("splits a max-size 8192 B same-language uplink into two 24 kHz frames", async () => {
     const room = freshRoom();
     const { teacher, sEn, sFr, sAr2 } = await quartet(room);
-    await teacherTakesFloor(teacher, sEn, sFr, sAr2);
+    await teacherOpensMic(teacher, sEn, sFr, sAr2);
 
     // 8192 B is the largest legal uplink payload; 16->24 kHz yields 12288 B,
     // so the relay must split it (8192 + 4096) instead of hitting the codec
@@ -584,18 +566,18 @@ describe("ClassRoom audio fan-out (T-009, FR-015/020..025)", () => {
     expect(equalBytes(b.payload, expected.slice(8192))).toBe(true);
   });
 
-  it("non-holder binary is dropped with error{not-your-floor} (rule 6)", async () => {
+  it("closed-mic binary is dropped with error{mic-closed} (FR-012)", async () => {
     const room = freshRoom();
     const { teacher, sEn, sFr, sAr2 } = await quartet(room);
-    await teacherTakesFloor(teacher, sEn, sFr, sAr2);
+    await teacherOpensMic(teacher, sEn, sFr, sAr2);
 
     sEn.ws.send(uplinkFrame(0, new Uint8Array(160).fill(0x01)));
     expect(await sEn.nextError()).toMatchObject({
       t: "error",
-      code: "not-your-floor",
+      code: "mic-closed",
     });
 
-    // Nobody hears the dropped frame: the holder gets no binary from it.
+    // Nobody hears the dropped frame: the open mics get no binary from it.
     await teacher.quietBinary();
     await sFr.quietBinary();
     await sAr2.quietBinary();
@@ -609,9 +591,9 @@ describe("ClassRoom audio fan-out (T-009, FR-015/020..025)", () => {
       lang: "ar",
       name: "Layla",
     });
-    await drainWelcomeAndHands(teacher, 1);
-    teacher.ws.send(JSON.stringify({ t: "speaking-start" }));
-    await teacher.nextOfType("floor-changed");
+    await drainWelcome(teacher, 1);
+    teacher.ws.send(JSON.stringify({ t: "mic-open" }));
+    await teacher.nextOfType("mic-changed");
 
     for (let i = 0; i < 30; i += 1) {
       teacher.ws.send(uplinkFrame(i, new Uint8Array(16).fill(0x02)));
@@ -630,9 +612,9 @@ describe("ClassRoom audio fan-out (T-009, FR-015/020..025)", () => {
       lang: "ar",
       name: "Layla",
     });
-    await drainWelcomeAndHands(teacher, 1);
-    teacher.ws.send(JSON.stringify({ t: "speaking-start" }));
-    await teacher.nextOfType("floor-changed");
+    await drainWelcome(teacher, 1);
+    teacher.ws.send(JSON.stringify({ t: "mic-open" }));
+    await teacher.nextOfType("mic-changed");
 
     teacher.ws.send(uplinkFrame(0, new Uint8Array(9000).fill(0x03)));
     expect(await teacher.nextError()).toMatchObject({
@@ -649,9 +631,9 @@ describe("ClassRoom audio fan-out (T-009, FR-015/020..025)", () => {
       lang: "ar",
       name: "Layla",
     });
-    await drainWelcomeAndHands(teacher, 1);
-    teacher.ws.send(JSON.stringify({ t: "speaking-start" }));
-    await teacher.nextOfType("floor-changed");
+    await drainWelcome(teacher, 1);
+    teacher.ws.send(JSON.stringify({ t: "mic-open" }));
+    await teacher.nextOfType("mic-changed");
 
     teacher.ws.send(new Uint8Array([0x01, 0x01, 0x00]));
     await teacher.quietText();
@@ -659,5 +641,30 @@ describe("ClassRoom audio fan-out (T-009, FR-015/020..025)", () => {
 
     teacher.ws.send(JSON.stringify({ t: "ping", id: 9 }));
     expect(await teacher.nextOfType("pong")).toEqual({ t: "pong", id: 9 });
+  });
+
+  it("a departing student releases only their own pipes; the teacher's legs keep flowing", async () => {
+    const room = freshRoom();
+    const { teacher, sEn, sFr, sAr2 } = await quartet(room);
+    await teacherOpensMic(teacher, sEn, sFr, sAr2);
+
+    const payload = new Uint8Array(160).fill(0x66);
+    for (let i = 0; i < 3; i += 1) teacher.ws.send(uplinkFrame(i, payload));
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    const frBefore = captionsOf(sFr).filter((c) => c.kind === "output").length;
+    expect(frBefore).toBeGreaterThanOrEqual(1);
+
+    // Regression: the membership row is deleted before the disconnect's pipe
+    // effects run. If the effects resolved by pid (row now missing -> teacher
+    // index 0), the teacher's legs get released and her captions stop. The
+    // quiet, closed-mic student is enough to trigger that path.
+    sEn.ws.close(1000, "bye");
+    await sFr.nextOfType("welcome");
+    await teacher.nextOfType("welcome");
+
+    for (let i = 3; i < 6; i += 1) teacher.ws.send(uplinkFrame(i, payload));
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    const frAfter = captionsOf(sFr).filter((c) => c.kind === "output").length;
+    expect(frAfter).toBeGreaterThan(frBefore);
   });
 });
