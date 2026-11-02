@@ -4,8 +4,8 @@
 export type Role = "teacher" | "student";
 
 export type ClientMsg =
-  | { t: "mic-open" }
-  | { t: "mic-close" }
+  | { t: "mic-open"; epoch?: number }
+  | { t: "mic-close"; epoch?: number }
   | { t: "mute-all" }
   | { t: "unmute-all" }
   | { t: "mute"; participantId: string }
@@ -76,6 +76,10 @@ function isString(value: unknown): value is string {
 
 function isNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
+}
+
+function isU16(value: unknown): value is number {
+  return isNumber(value) && Number.isInteger(value) && value >= 0 && value <= 0xffff;
 }
 
 /** Exact-key check: required keys present, no unexpected keys beyond allowed. */
@@ -171,9 +175,15 @@ export function isClientMsg(value: unknown): value is ClientMsg {
   const tag = value["t"];
   switch (tag) {
     case "mic-open":
-      return hasOnlyKeys(value, ["t"]);
+      return (
+        hasOnlyKeys(value, ["t"], ["epoch"]) &&
+        (value["epoch"] === undefined || isU16(value["epoch"]))
+      );
     case "mic-close":
-      return hasOnlyKeys(value, ["t"]);
+      return (
+        hasOnlyKeys(value, ["t"], ["epoch"]) &&
+        (value["epoch"] === undefined || isU16(value["epoch"]))
+      );
     case "mute-all":
       return hasOnlyKeys(value, ["t"]);
     case "unmute-all":

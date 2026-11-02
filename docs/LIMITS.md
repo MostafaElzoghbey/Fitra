@@ -78,6 +78,18 @@ Deliberate non-goals: speed/rate control, per-word timing, glossary steering,
 and voice selection. None are documented capabilities, so the UI must not
 pretend they exist.
 
+### 2.2 Per-epoch session memory
+
+A `mic-open` starts a new utterance epoch; the previous epoch's session drains
+(1.2 s of output silence, 4 s hard cap) while the new epoch opens a fresh
+session. Worst case is therefore two provider sessions per
+`(speaker, src→tgt)` pair for a few seconds. The cap still counts live entries,
+but the manager evicts the oldest *draining* entry before degrading a newcomer,
+so the transient overlap cannot starve an active pipe. Gemini's pre-`setupComplete`
+buffer holds up to 50 × 3 200 B = 160 kB per opening session (5 s of speech),
+so a slow handshake no longer drops the first 500 ms; 8 sessions cap that at
+~1.3 MB, well inside the 128 MB DO budget.
+
 ## 3. One-hour class budget: 1 teacher + 10 students, 3 languages (ar/en/fr)
 
 Assumptions: one active speaker at a time (worst case is stable classroom

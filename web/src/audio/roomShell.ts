@@ -75,6 +75,9 @@ export function attachRoomAudio(
   let receivedCount = 0;
   let injector: AudioInjector | null = null;
   let mic: MicCapture | null = null;
+  let micEpoch = 0;
+  let controlGen = 0;
+  let controlQueue: Promise<void> = Promise.resolve();
   let disposed = false;
 
   setLatencyStatsReader({
@@ -102,6 +105,7 @@ export function attachRoomAudio(
     if (msg.t === "mic-changed" && msg.participantId === selfId && !msg.micOpen) {
       // Server-authoritative cut (teacher mute / mute-all): stop the local
       // source; the wire already knows, so no control frame is echoed.
+      controlGen += 1;
       stopSource();
     }
   });
@@ -115,7 +119,21 @@ export function attachRoomAudio(
     }
   });
 
-  function startSource(): void {
+  function enqueue(gen: number, task: () => Promise<void>): void {
+    controlQueue = controlQueue
+      .then(() => {
+        if (gen !== controlGen || disposed) return;
+        return task();
+      })
+      .catch(() => undefined);
+  }
+
+  async function startSource(): Promise<void> {
+    sender.setSocket(adapter);
+    if (mic !== null) {
+      mic.stop();
+      mic = null;
+    }
     if (injectAudioRequested(window.location.search)) {
       if (injector === null) {
         injector = createAudioInjector({ sender, startDelayMs: 500 });
@@ -123,36 +141,66 @@ export function attachRoomAudio(
       injector.start();
       return;
     }
-    if (mic === null) {
-      mic = new MicCapture({
-        sender,
-        onNotice: (notice) => options.onMicError?.(notice),
-      });
-      void mic.start().catch(() => undefined);
-    } else {
-      sender.setSocket(adapter);
-      void mic.resume().catch(() => undefined);
+    const capture = new MicCapture({
+      sender,
+      onNotice: (notice) => options.onMicError?.(notice),
+    });
+    mic = capture;
+    try {
+      await capture.start();
+    } catch (error) {
+      if (mic === capture) mic = null;
+      capture.stop();
+      throw error;
     }
   }
 
   function stopSource(): void {
     injector?.stop();
-    if (mic !== null) sender.setSocket(null);
+    sender.setSocket(null);
+    if (mic !== null) {
+      mic.stop();
+      mic = null;
+    }
+  }
+
+  async function flushAndStopSource(): Promise<void> {
+    injector?.stop();
+    const capture = mic;
+    mic = null;
+    if (capture === null) {
+      sender.setSocket(null);
+      return;
+    }
+    await capture.flush().catch(() => undefined);
+    sender.setSocket(null);
+    capture.stop();
   }
 
   return {
     openMic(): void {
       if (disposed) return;
-      socket.send({ t: "mic-open" });
-      startSource();
+      const gen = ++controlGen;
+      micEpoch = (micEpoch + 1) % 65536;
+      const epoch = micEpoch;
+      enqueue(gen, async () => {
+        sender.setEpoch(epoch);
+        socket.send({ t: "mic-open", epoch });
+        await startSource();
+      });
     },
     closeMic(): void {
       if (disposed) return;
-      socket.send({ t: "mic-close" });
-      stopSource();
+      const gen = ++controlGen;
+      const epoch = micEpoch;
+      enqueue(gen, async () => {
+        await flushAndStopSource();
+        if (!disposed) socket.send({ t: "mic-close", epoch });
+      });
     },
     dispose(): void {
       disposed = true;
+      controlGen += 1;
       injector?.stop();
       injector = null;
       if (mic !== null) {

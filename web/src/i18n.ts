@@ -180,6 +180,7 @@ export interface UiStrings {
   readonly micHint: string;
   readonly micDeniedHint: string;
   readonly micDeviceLostHint: string;
+  readonly micProcessingHint: string;
   readonly headphonesHint: string;
   readonly generatedVoiceNote: string;
   readonly testDeploymentBadge: string;
@@ -350,6 +351,8 @@ const STRINGS: Record<SupportedUiLang, UiStrings> = {
       "رُفض إذن الميكروفون. فعّله من إعدادات المتصفح ثم أعد المحاولة.",
     micDeviceLostHint:
       "لم يعد الميكروفون المختار متاحًا، فاتّجه الصوت إلى الميكروفون الافتراضي.",
+    micProcessingHint:
+      "لم يطبّق المتصفح كل معالجة الصوت (إلغاء الصدى أو كتم الضجيج أو التسوية التلقائية). جرّب متصفحًا آخر أو أعد فتح الميكروفون.",
     headphonesHint:
       "استخدم سمّاعة رأس لتفادي الصدى وخلط الأصوات في الغرفة.",
     generatedVoiceNote:
@@ -521,6 +524,8 @@ const STRINGS: Record<SupportedUiLang, UiStrings> = {
       "Microphone permission was denied. Enable it in your browser settings and try again.",
     micDeviceLostHint:
       "The selected microphone is gone, so audio switched to the default one.",
+    micProcessingHint:
+      "Your browser did not apply all microphone processing (echo cancellation, noise suppression or auto gain). Try another browser or reopen the mic.",
     headphonesHint:
       "Use headphones to avoid echo and mixed-up voices in the room.",
     generatedVoiceNote:
@@ -695,6 +700,8 @@ const STRINGS: Record<SupportedUiLang, UiStrings> = {
       "L’autorisation du micro a été refusée. Activez-la dans votre navigateur puis réessayez.",
     micDeviceLostHint:
       "Le micro choisi n’est plus disponible ; le son passe sur le micro par défaut.",
+    micProcessingHint:
+      "Votre navigateur n’a pas appliqué tous les traitements du micro (annulation d’écho, réduction de bruit ou gain automatique). Essayez un autre navigateur ou rouvrez le micro.",
     headphonesHint:
       "Utilisez un casque pour éviter l’écho et les voix mélangées.",
     generatedVoiceNote:
@@ -869,6 +876,8 @@ const STRINGS: Record<SupportedUiLang, UiStrings> = {
       "Se denegó el permiso del micrófono. Actívalo en el navegador y vuelve a intentarlo.",
     micDeviceLostHint:
       "El micrófono elegido ya no está, así que el audio pasó al micrófono predeterminado.",
+    micProcessingHint:
+      "Tu navegador no aplicó todo el procesamiento del micrófono (cancelación de eco, supresión de ruido o ganancia automática). Prueba otro navegador o vuelve a abrir el micro.",
     headphonesHint:
       "Usa auriculares para evitar el eco y las voces mezcladas.",
     generatedVoiceNote:

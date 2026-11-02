@@ -251,14 +251,14 @@ async function teacherOpensMic(
   expect(await sAr2.nextOfType("mic-changed")).toEqual(changed);
 }
 
-function uplinkFrame(seq: number, payload: Uint8Array): Uint8Array {
+function uplinkFrame(seq: number, payload: Uint8Array, epoch = 0): Uint8Array {
   const out = new Uint8Array(8 + payload.length);
   const view = new DataView(out.buffer);
   view.setUint8(0, 0x01);
   view.setUint8(1, 0x01);
   view.setUint16(2, seq, true);
   view.setUint16(4, 0, true);
-  view.setUint16(6, 0, true);
+  view.setUint16(6, epoch, true);
   out.set(payload, 8);
   return out;
 }
@@ -348,6 +348,30 @@ describe("pair-fanout dedupe, pre-warm, captions, rejoin (latency/quality M0.5)"
     expect(countMatchingEchoes(sFr, payload)).toBe(4);
     await sEn1.quietBinary();
     await sEn2.quietBinary();
+  });
+
+  it("drops a superseded capture epoch and forwards the current one", async () => {
+    const room = freshRoom();
+    const { teacher, sEn } = await quartet(room);
+    teacher.ws.send(JSON.stringify({ t: "mic-open", epoch: 2 }));
+    expect((await teacher.nextOfType("mic-changed")).micOpen).toBe(true);
+
+    const stale = new Uint8Array(160).fill(0x31);
+    const current = new Uint8Array(160).fill(0x32);
+    teacher.ws.send(uplinkFrame(0, stale, 1));
+    teacher.ws.send(uplinkFrame(0, current, 2));
+
+    const expected = upsample16kTo24kMono(current);
+    const received = await sEn.nextBinaryWhere((raw) => {
+      try {
+        const d = decodeAudioFrame(raw);
+        return d.type === FITRA_AUDIO_TYPE_DOWNLINK && equalBytes(d.payload, expected);
+      } catch {
+        return false;
+      }
+    });
+    expect(decodeAudioFrame(received).epoch).toBe(2);
+    expect(countMatchingEchoes(sEn, stale)).toBe(0);
   });
 
   it("pre-warms sessions at mic-open: session-status arrives before any audio", async () => {

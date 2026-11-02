@@ -81,9 +81,44 @@ export const CAPTURE_WORKLET_URL = "/worklets/capture.worklet.js";
 /** Query flag that swaps the microphone for synthetic PCM (T-016). */
 export const INJECT_AUDIO_PARAM = "injectAudio";
 
+/** One-pole high-pass corner: removes rumble/handling noise below speech. */
+export const CAPTURE_HIGH_PASS_HZ = 90;
+
+/** How long `flush()` waits for the worklet's partial-frame ack. */
+export const CAPTURE_FLUSH_TIMEOUT_MS = 250;
+
 /* -------------------------------------------------------------------------- */
 /* Pure helpers (unit-tested in web/tests/audio-pure.test.ts)                 */
 /* -------------------------------------------------------------------------- */
+
+export interface HighPassState {
+  readonly alpha: number;
+  previousInput: number;
+  previousOutput: number;
+}
+
+export function createHighPassState(
+  sampleRateHz: number,
+  cutoffHz: number = CAPTURE_HIGH_PASS_HZ,
+): HighPassState {
+  if (!(sampleRateHz > 0) || !(cutoffHz > 0)) {
+    throw new RangeError(`sample rate and cutoff must be positive, got ${sampleRateHz} / ${cutoffHz}`);
+  }
+  return {
+    alpha: 1 / (1 + (2 * Math.PI * cutoffHz) / sampleRateHz),
+    previousInput: 0,
+    previousOutput: 0,
+  };
+}
+
+/** y[n] = α · (y[n-1] + x[n] − x[n-1]); mirrors the worklet's filter. */
+export function highPassSample(state: HighPassState, sample: number): number {
+  const input = typeof sample === "number" && Number.isFinite(sample) ? sample : 0;
+  const output = state.alpha * (state.previousOutput + input - state.previousInput);
+  state.previousInput = input;
+  state.previousOutput = output;
+  return output;
+}
 
 export interface DownsampleState {
   readonly fromRate: number;
@@ -213,6 +248,7 @@ export interface CaptureStats {
   readonly framesDropped: number;
   readonly bufferedBytes: number;
   readonly speakerIndex: number;
+  readonly epoch: number;
 }
 
 /**
@@ -224,6 +260,7 @@ export interface CaptureStats {
 export class AudioFrameSender {
   private socket: FrameSocket | null;
   private speaker = 0;
+  private epoch = 0;
   private seq = 0;
   private framesSentCount = 0;
   private framesDroppedCount = 0;
@@ -242,6 +279,18 @@ export class AudioFrameSender {
 
   get speakerIndex(): number {
     return this.speaker;
+  }
+
+  /** Capture generation announced in `mic-open`; stamps every uplink frame. */
+  setEpoch(epoch: number): void {
+    if (!Number.isInteger(epoch) || epoch < 0 || epoch > 0xffff) {
+      throw new RangeError(`epoch must be an integer in [0, 65535], got ${epoch}`);
+    }
+    this.epoch = epoch;
+  }
+
+  get currentEpoch(): number {
+    return this.epoch;
   }
 
   /** Swap the socket on reconnect (T-012 owns the reconnect policy). */
@@ -266,6 +315,7 @@ export class AudioFrameSender {
           type: FITRA_AUDIO_TYPE_UPLINK,
           seq: this.seq,
           speaker: this.speaker,
+          epoch: this.epoch,
           payload,
         }),
       );
@@ -286,6 +336,7 @@ export class AudioFrameSender {
       framesDropped: this.framesDroppedCount,
       bufferedBytes: this.socket?.bufferedAmount ?? 0,
       speakerIndex: this.speaker,
+      epoch: this.epoch,
     };
   }
 }
@@ -318,6 +369,7 @@ export class MicCapture {
   private inputs: MicInputDevice[] = [];
   private unwatchDevices: (() => void) | null = null;
   private releaseGesture: (() => void) | null = null;
+  private readonly flushWaiters = new Set<() => void>();
   private stopped = false;
 
   constructor(options: MicCaptureOptions) {
@@ -363,6 +415,10 @@ export class MicCapture {
       return;
     }
     const stream = await this.openStream();
+    if (this.stopped) {
+      disposeMediaStream(stream);
+      return;
+    }
     const ctx = new AudioContext({
       sampleRate: CAPTURE_SAMPLE_RATE_HZ,
       latencyHint: "interactive",
@@ -370,6 +426,13 @@ export class MicCapture {
     this.ctx = ctx;
     this.stream = stream;
     await ctx.audioWorklet.addModule(this.workletUrl);
+    if (this.stopped) {
+      void ctx.close().catch(() => undefined);
+      disposeMediaStream(stream);
+      this.ctx = null;
+      this.stream = null;
+      return;
+    }
     const node = new AudioWorkletNode(ctx, CAPTURE_WORKLET_PROCESSOR, {
       numberOfInputs: 1,
       numberOfOutputs: 0,
@@ -379,6 +442,10 @@ export class MicCapture {
       processorOptions: { frameSamples: CAPTURE_FRAME_SAMPLES },
     });
     node.port.onmessage = (event: MessageEvent<unknown>): void => {
+      if (workletMessageType(event) === "flushed") {
+        this.resolveFlush();
+        return;
+      }
       const payload = workletFramePayload(event);
       if (payload !== null) {
         this.sender.sendPcm16le(payload);
@@ -406,11 +473,46 @@ export class MicCapture {
   /** Resume the context from a click handler when the gesture policy requires it. */
   async resume(): Promise<boolean> {
     const ctx = this.ctx;
-    if (ctx === null || contextRunning(ctx)) {
-      return ctx !== null;
+    if (ctx === null) {
+      return false;
     }
-    await ctx.resume();
-    return contextRunning(ctx);
+    if (!contextRunning(ctx)) {
+      await ctx.resume();
+    }
+    const running = contextRunning(ctx);
+    if (running) {
+      this.node?.port.postMessage({ type: "resume" });
+    }
+    return running;
+  }
+
+  /**
+   * Emit the partial frame the worklet is holding, then pause it. Resolves on
+   * the worklet's ack (or the timeout), so the caller can send `mic-close`
+   * only after the last samples are on the wire.
+   */
+  async flush(timeoutMs: number = CAPTURE_FLUSH_TIMEOUT_MS): Promise<void> {
+    const node = this.node;
+    if (node === null || this.stopped) {
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      const waiter = (): void => {
+        clearTimeout(timer);
+        this.flushWaiters.delete(waiter);
+        resolve();
+      };
+      const timer = setTimeout(waiter, timeoutMs);
+      this.flushWaiters.add(waiter);
+      node.port.postMessage({ type: "flush" });
+    });
+  }
+
+  private resolveFlush(): void {
+    for (const waiter of this.flushWaiters) {
+      waiter();
+    }
+    this.flushWaiters.clear();
   }
 
   /** Refreshed input list (labels appear only after permission was granted). */
@@ -438,6 +540,7 @@ export class MicCapture {
     this.unwatchDevices = null;
     this.releaseGesture?.();
     this.releaseGesture = null;
+    this.resolveFlush();
     this.node?.disconnect();
     this.node = null;
     this.source?.disconnect();
@@ -508,6 +611,7 @@ export class MicCapture {
       console.warn(
         "[fitra] echo cancellation / noise suppression / AGC not all applied; check browser settings",
       );
+      this.onNotice("mic-processing-degraded");
     }
   }
 }
@@ -518,6 +622,15 @@ export class MicCapture {
  */
 function contextRunning(ctx: AudioContext): boolean {
   return ctx.state === "running";
+}
+
+function workletMessageType(event: MessageEvent<unknown>): string | null {
+  const data = event.data;
+  if (typeof data !== "object" || data === null) {
+    return null;
+  }
+  const message = data as { readonly type?: unknown };
+  return typeof message.type === "string" ? message.type : null;
 }
 
 /** Narrow a worklet `MessageEvent` to PCM bytes, or null when malformed. */

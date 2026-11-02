@@ -14,6 +14,9 @@
  *   out: `{ type: "frame", pcm: ArrayBuffer }` messages, one per full frame,
  *        1600 samples (100 ms @ 16 kHz) of PCM16LE mono, transferred (not
  *        copied) to the main thread. No message when a frame is incomplete.
+ *   control in: `{ type: "flush" }` emits the partial frame, pauses capture and
+ *        answers `{ type: "flushed" }`; `{ type: "resume" }` unpauses;
+ *        `{ type: "reset" }` drops the partial frame.
  *
  * DSP rules (see docs/LIMITS.md §2 — Gemini wants raw PCM16LE 16 kHz mono in
  * 100 ms chunks):
@@ -39,6 +42,7 @@ const PROCESSOR_NAME = "fitra-capture";
 const TARGET_SAMPLE_RATE_HZ = 16000;
 const FRAME_SAMPLES = 1600; // 100 ms @ 16 kHz
 const PCM16_SCALE = 32767; // NOT 32768 (int16 overflow at full scale)
+const HPF_CUTOFF_HZ = 90;
 
 /** Non-finite -> 0, clamped to [-1, 1]. */
 function sanitize(sample) {
@@ -73,6 +77,12 @@ class FitraCaptureProcessor extends AudioWorkletProcessor {
     this.frame = new Int16Array(this.frameSamples);
     this.frameIndex = 0;
     this.framesEmitted = 0;
+    this.paused = false;
+
+    // One-pole high-pass, carried across process() calls.
+    this.hpAlpha = 1 / (1 + (2 * Math.PI * HPF_CUTOFF_HZ) / sampleRate);
+    this.hpPrevInput = 0;
+    this.hpPrevOutput = 0;
 
     // Resampler state, carried across process() calls.
     this.position = 0; // next output read position, absolute input samples
@@ -81,16 +91,44 @@ class FitraCaptureProcessor extends AudioWorkletProcessor {
     this.hasPrevious = false;
 
     this.port.onmessage = (event) => {
-      if (event && event.data && event.data.type === "reset") {
-        // Mic close / reconnect: drop the partial frame, keep buffers.
+      const type = event && event.data ? event.data.type : undefined;
+      if (type === "reset") {
         this.frameIndex = 0;
+        return;
+      }
+      if (type === "flush") {
+        this.emitPartialFrame();
+        this.paused = true;
+        this.port.postMessage({ type: "flushed" });
+        return;
+      }
+      if (type === "resume") {
+        this.paused = false;
       }
     };
   }
 
+  highPass(sample) {
+    const output = this.hpAlpha * (this.hpPrevOutput + sample - this.hpPrevInput);
+    this.hpPrevInput = sample;
+    this.hpPrevOutput = output;
+    return output;
+  }
+
+  emitPartialFrame() {
+    if (this.frameIndex === 0) {
+      return;
+    }
+    const payload = this.frame.slice(0, this.frameIndex);
+    this.frameIndex = 0;
+    this.framesEmitted += 1;
+    this.port.postMessage({ type: "frame", pcm: payload.buffer }, [payload.buffer]);
+  }
+
   /** Append one float sample (already sanitized) to the pending frame. */
   writeSample(sample) {
-    const scaled = sample * PCM16_SCALE;
+    const filtered = this.highPass(sample);
+    const scaled = filtered * PCM16_SCALE;
     // Round half away from zero (Math.round is asymmetric at -0.5 LSB).
     const value = scaled < 0 ? -Math.round(-scaled) : Math.round(scaled);
     this.frame[this.frameIndex] = value;
@@ -142,6 +180,9 @@ class FitraCaptureProcessor extends AudioWorkletProcessor {
     const channel = inputs[0] ? inputs[0][0] : undefined;
     if (channel === undefined || channel.length === 0) {
       return true; // no input wired yet (or muted): stay alive
+    }
+    if (this.paused) {
+      return true;
     }
     if (this.resampling) {
       this.accumulateResampled(channel);

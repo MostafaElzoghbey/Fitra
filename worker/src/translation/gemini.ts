@@ -164,8 +164,9 @@ export function handleGeminiServerText(
 type SetupPlacement = "documented" | "toplevel";
 
 /** Frames held while the socket is open-but-not-setup (Gemini drops audio
- * sent before setupComplete). 5 × 100 ms = 500 ms of speech. */
-export const GEMINI_PRE_LIVE_BUFFER_FRAMES = 5;
+ * sent before setupComplete). 50 × 100 ms = 5 s: enough that a slow handshake
+ * never truncates the start of an utterance. */
+export const GEMINI_PRE_LIVE_BUFFER_FRAMES = 50;
 
 class GeminiTranslationSession implements TranslationSession {
   private socket: GeminiSocket | null = null;

@@ -154,6 +154,7 @@ sequenceDiagram
   also `.../durable-objects/concepts/durable-object-lifecycle/`). → While any
   translation session is open, the DO is billed for full wall-clock duration
   (see `docs/LIMITS.md` budget). Mitigations: idle-close sessions after 60 s,
+  drain-and-retire after `mic-close` (1.2 s quiet / 4 s cap),
   idle-room shutdown, no `setInterval` (use `alarm()` for timeouts — alarms
   prevent hibernation too, so schedule sparsely).
 - **No concurrent streaming subrequests in one DO**: one Gemini WS per
@@ -181,7 +182,7 @@ export interface TranslationSession {
   readonly sourceLang: Lang;
   readonly targetLang: Lang;
   sendInputAudio(pcm16kMono: ArrayBuffer): void; // 16kHz PCM16LE mono, ~100ms
-  endInput(): void;   // speaker paused; keep session warm until idle timeout
+  endInput(): void;   // speaker paused; drain the tail, then retire the epoch
   close(): void;
 }
 
@@ -193,11 +194,13 @@ export interface TranslationProvider {
 ```
 
 - **SessionManager** (pure logic, unit-tested): `key = speakerIndex:src→tgt`
-  (one pipe per open mic × target language), lazy open,
-  refcount by listener set, idle-close (default 60 s), cap
+  plus the capture epoch (one pipe per open mic × target language × epoch;
+  the wire pair stays `speakerIndex:src→tgt`), lazy open,
+  refcount by listener set, idle-close (default 60 s) for listeners that
+  simply left, drain-and-retire after `endInput` (1.2 s quiet, 4 s cap), cap
   `maxTranslationSessions` (default 8). Overflow policy: protect teacher-leg
-  sessions, then earliest-created; overflowed listeners receive
-  `session-degraded` + muted translated track (FR-024).
+  sessions, then earliest-created, evicting a draining epoch first; overflowed
+  listeners receive `session-degraded` + muted translated track (FR-024).
   M0.5 latency/quality additions the DO wraps around it: a mic-open
   pre-warms the speaker's pair set eagerly (ensureSession effect →
   `prewarmSessions`) so the first spoken frame does not pay the

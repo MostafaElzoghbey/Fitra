@@ -425,7 +425,7 @@ describe("GeminiTranslationProvider (T-015)", () => {
     await provider.closeAll();
   });
 
-  it("buffers pre-live audio, flushes in order on setupComplete, caps at 5 frames", async () => {
+  it("buffers pre-live audio and flushes every frame in order on setupComplete", async () => {
     const sockets: FakeGeminiSocket[] = [];
     const provider = new GeminiTranslationProvider("test-key", {
       createSocket: (url) => {
@@ -452,12 +452,41 @@ describe("GeminiTranslationProvider (T-015)", () => {
     sockets[0]?.serverText({ setupComplete: {} });
     expect(c.status.map((e) => e.s)).toEqual(["connecting", "live"]);
 
-    // Last 5 buffered frames flush in order ahead of nothing else.
     const audioFrames = (sockets[0] as FakeGeminiSocket).sent.slice(1).map((raw) => {
       const parsed = JSON.parse(raw) as { realtimeInput: { audio: { data: string } } };
       return Array.from(atob(parsed.realtimeInput.audio.data), (ch) => ch.charCodeAt(0));
     });
-    expect(audioFrames).toEqual(payloads.slice(3));
+    expect(audioFrames).toEqual(payloads);
+    session.close();
+    await provider.closeAll();
+  });
+
+  it("caps the pre-live buffer at 50 frames, keeping the newest", async () => {
+    const sockets: FakeGeminiSocket[] = [];
+    const provider = new GeminiTranslationProvider("test-key", {
+      createSocket: (url) => {
+        const socket = new FakeGeminiSocket(url);
+        sockets.push(socket);
+        return socket;
+      },
+    });
+    const c = collect();
+    const session = await provider.openSession("ar", "en", c.ev);
+
+    const payloads: number[][] = [];
+    for (let i = 0; i < 60; i += 1) {
+      const payload = [i, i];
+      payloads.push(payload);
+      session.sendInputAudio(new Uint8Array(payload).buffer as ArrayBuffer);
+    }
+    sockets[0]?.serverOpen();
+    sockets[0]?.serverText({ setupComplete: {} });
+
+    const audioFrames = (sockets[0] as FakeGeminiSocket).sent.slice(1).map((raw) => {
+      const parsed = JSON.parse(raw) as { realtimeInput: { audio: { data: string } } };
+      return Array.from(atob(parsed.realtimeInput.audio.data), (ch) => ch.charCodeAt(0));
+    });
+    expect(audioFrames).toEqual(payloads.slice(10));
     session.close();
     await provider.closeAll();
   });

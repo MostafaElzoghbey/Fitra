@@ -246,6 +246,8 @@ export class ClassRoom {
    * writes (AGENTS.md rule 2).
    */
   private micState: MicState = initialMicState();
+  /** Latest capture epoch per pid; memory-only, like micOpen. */
+  private readonly micEpoch = new Map<string, number>();
   /** mic_control row applied to this wake; load-once per isolate. */
   private micControlLoaded = false;
   /** Last persisted mic_control signature; skips no-op SQLite writes. */
@@ -271,7 +273,7 @@ export class ClassRoom {
    * type-0x02 frames: parallel speaker pipes keep independent cursors so a
    * client can demux by the downlink `speaker` field without fake loss.
    */
-  private readonly outSeq = new Map<string, Map<number, number>>();
+  private readonly outSeq = new Map<string, Map<string, number>>();
   /** T-020 counters: pure, timer-free; pulses ride real events only. */
   private readonly collector = new MetricsCollector();
   /** Re-entrancy guard: the metrics send's own recordOutbound must not pulse. */
@@ -425,6 +427,7 @@ export class ClassRoom {
       this.controlStamps.delete(member.pid);
       this.audioOverRuns.delete(member.pid);
       this.outSeq.delete(member.pid);
+      this.micEpoch.delete(member.pid);
       // A departure that was speaking broadcasts mic-changed{false}; the
       // machine also clears their force-mute flag with the roster row.
       this.publishMic(
@@ -470,16 +473,20 @@ export class ClassRoom {
           JSON.stringify({ t: "pong", id: parsed.id } satisfies ServerMsg),
         );
         return;
-      case "mic-open":
+      case "mic-open": {
+        this.micEpoch.set(member.pid, parsed.epoch ?? 0);
         this.dispatchMic(ws, {
           type: "micOpen",
           participantId: member.pid,
           isTeacher: member.role === "teacher",
         });
         return;
-      case "mic-close":
+      }
+      case "mic-close": {
         this.dispatchMic(ws, { type: "micClose", participantId: member.pid });
+        this.micEpoch.delete(member.pid);
         return;
+      }
       case "mute":
       case "unmute": {
         if (member.role !== "teacher") {
@@ -801,9 +808,13 @@ export class ClassRoom {
       }
       return;
     }
+    const expectedEpoch = this.micEpoch.get(member.pid) ?? 0;
+    if (decoded.epoch !== expectedEpoch) {
+      this.audioDrops += 1;
+      return;
+    }
     this.fanoutAudio(member, decoded);
   }
-
   /** FR-052: at most 20 audio frames/s per connection; the first over-rate frame
    * in a burst is dropped silently, repeated bursts answer `rate-limited`. */
   private checkAudioRate(ws: WebSocket, member: SocketMember): boolean {
@@ -865,8 +876,8 @@ export class ClassRoom {
       onSessionStatus: (pair, status, attempt) => {
         this.broadcastSessionStatus(pair, status, attempt);
       },
-      onAudio: (pair, speakerIndex, pcm) => {
-        this.forwardTranslated(pair, speakerIndex, pcm);
+      onAudio: (pair, speakerIndex, epoch, pcm) => {
+        this.forwardTranslated(pair, speakerIndex, epoch, pcm);
       },
       onTranscript: (pair, speakerIndex, kind, text, final) => {
         this.broadcastCaption(pair, speakerIndex, kind, text, final);
@@ -915,7 +926,7 @@ export class ClassRoom {
       const targetLang = langs.get(entry.member.pid);
       if (targetLang === undefined) continue;
       if (targetLang === sourceLang) {
-        this.relayAudio(entry, speaker, payload);
+        this.relayAudio(entry, speaker, payload, decoded.epoch);
         continue;
       }
       const group = membersByLang.get(targetLang);
@@ -944,7 +955,7 @@ export class ClassRoom {
           sourceLang,
           targetLang,
           member.pid,
-          { isTeacherLeg: member.role === "teacher" },
+          { isTeacherLeg: member.role === "teacher", epoch: decoded.epoch },
         );
         if (acquired.degraded) {
           this.sendError(
@@ -964,6 +975,7 @@ export class ClassRoom {
     { ws, member }: Pick<LiveSocket, "ws" | "member">,
     speaker: SocketMember,
     payload: Uint8Array,
+    epoch: number,
   ): void {
     // Same-language relay (FR-021, no translation session): the uplink
     // payload is 16 kHz, but DO->client frames are 24 kHz (PROTOCOL
@@ -977,7 +989,7 @@ export class ClassRoom {
     // the codec rejects as frame-too-large. Split exactly like translated
     // audio so large same-language frames are not silently dropped.
     const pieces = splitPayloadForWire(upsampled);
-    let seq = this.outSeqFor(member.pid, speaker.index);
+    let seq = this.outSeqFor(member.pid, speaker.index, epoch);
     for (const piece of pieces) {
       let relay: Uint8Array;
       try {
@@ -985,6 +997,7 @@ export class ClassRoom {
           type: FITRA_AUDIO_TYPE_DOWNLINK,
           seq,
           speaker: speaker.index,
+          epoch,
           payload: piece,
         });
       } catch {
@@ -994,21 +1007,26 @@ export class ClassRoom {
       seq = nextAudioSeq(seq);
       this.trySend(ws, relay);
     }
-    this.storeOutSeq(member.pid, speaker.index, seq);
+    this.storeOutSeq(member.pid, speaker.index, epoch, seq);
   }
 
-  private outSeqFor(listenerPid: string, speakerIndex: number): number {
-    return this.outSeq.get(listenerPid)?.get(speakerIndex) ?? 0;
+  private outSeqFor(
+    listenerPid: string,
+    speakerIndex: number,
+    epoch: number,
+  ): number {
+    return this.outSeq.get(listenerPid)?.get(`${speakerIndex}:${epoch}`) ?? 0;
   }
 
   private storeOutSeq(
     listenerPid: string,
     speakerIndex: number,
+    epoch: number,
     seq: number,
   ): void {
-    const perSpeaker = this.outSeq.get(listenerPid) ?? new Map<number, number>();
-    perSpeaker.set(speakerIndex, seq);
-    this.outSeq.set(listenerPid, perSpeaker);
+    const perPipe = this.outSeq.get(listenerPid) ?? new Map<string, number>();
+    perPipe.set(`${speakerIndex}:${epoch}`, seq);
+    this.outSeq.set(listenerPid, perPipe);
   }
 
   /** Mic-open pre-warms the speaker's pipe set eagerly (ensureSession effect)
@@ -1021,12 +1039,14 @@ export class ClassRoom {
     const sourceLang = langs.get(sourcePid);
     if (sourceLang === undefined) return;
     const speakerIndex = this.memberIndexOf(sourcePid);
+    const epoch = this.micEpoch.get(sourcePid) ?? 0;
     for (const { member } of this.liveSockets()) {
       if (member.pid === sourcePid) continue;
       const targetLang = langs.get(member.pid);
       if (targetLang === undefined || targetLang === sourceLang) continue;
       manager.acquire(speakerIndex, sourceLang, targetLang, member.pid, {
         isTeacherLeg: member.role === "teacher",
+        epoch,
       });
     }
   }
@@ -1039,6 +1059,7 @@ export class ClassRoom {
   private forwardTranslated(
     pair: string,
     speakerIndex: number,
+    epoch: number,
     pcm: ArrayBuffer,
   ): void {
     const sep = pair.indexOf("->");
@@ -1049,7 +1070,7 @@ export class ClassRoom {
     if (pieces.length === 0) return;
     for (const { ws, member } of this.liveSockets()) {
       if (langs.get(member.pid) !== targetLang) continue;
-      let seq = this.outSeqFor(member.pid, speakerIndex);
+      let seq = this.outSeqFor(member.pid, speakerIndex, epoch);
       for (const piece of pieces) {
         let frame: Uint8Array;
         try {
@@ -1057,6 +1078,7 @@ export class ClassRoom {
             type: FITRA_AUDIO_TYPE_DOWNLINK,
             seq,
             speaker: speakerIndex,
+            epoch,
             payload: piece,
           });
         } catch {
@@ -1066,7 +1088,7 @@ export class ClassRoom {
         seq = nextAudioSeq(seq);
         this.trySend(ws, frame);
       }
-      this.storeOutSeq(member.pid, speakerIndex, seq);
+      this.storeOutSeq(member.pid, speakerIndex, epoch, seq);
     }
   }
 

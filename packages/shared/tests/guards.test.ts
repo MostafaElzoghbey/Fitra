@@ -9,7 +9,10 @@ import {
 describe("client message guards (PROTOCOL.md section 3, mic model)", () => {
   const validClient = [
     { t: "mic-open" },
+    { t: "mic-open", epoch: 0 },
+    { t: "mic-open", epoch: 0xffff },
     { t: "mic-close" },
+    { t: "mic-close", epoch: 42 },
     { t: "mute-all" },
     { t: "unmute-all" },
     { t: "mute", participantId: "abc" },
@@ -47,6 +50,10 @@ describe("client message guards (PROTOCOL.md section 3, mic model)", () => {
       { t: "unmute", participantId: null },
       { t: "mute-all", participantId: "x" }, // mute-all takes no payload
       { t: "mic-open", participantId: "x" }, // mic-open takes no payload
+      { t: "mic-open", epoch: -1 },
+      { t: "mic-open", epoch: 0x10000 },
+      { t: "mic-close", epoch: 1.5 },
+      { t: "mic-close", epoch: "1" },
       { t: "ping" }, // missing id
       { t: "ping", id: "7" }, // wrong type
       { t: 42 },

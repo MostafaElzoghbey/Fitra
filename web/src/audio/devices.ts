@@ -18,11 +18,15 @@
 import type { UiStrings } from "../i18n.js";
 
 /** User-facing capture problems, mapped to i18n by {@link captureNoticeKey}. */
-export type CaptureNotice = "mic-denied" | "mic-device-lost";
+export type CaptureNotice =
+  | "mic-denied"
+  | "mic-device-lost"
+  | "mic-processing-degraded";
 
 export const CAPTURE_NOTICE_KEYS: Record<CaptureNotice, keyof UiStrings> = {
   "mic-denied": "micDeniedHint",
   "mic-device-lost": "micDeviceLostHint",
+  "mic-processing-degraded": "micProcessingHint",
 };
 
 export function captureNoticeKey(notice: CaptureNotice): keyof UiStrings {
@@ -39,6 +43,12 @@ export interface ProcessingSettings {
   readonly echoCancellation: boolean;
   readonly noiseSuppression: boolean;
   readonly autoGainControl: boolean;
+  readonly voiceIsolation: boolean;
+}
+
+/** `voiceIsolation` is Chrome-only and missing from the TS DOM lib. */
+export interface MicTrackConstraints extends MediaTrackConstraints {
+  voiceIsolation?: ConstrainBoolean;
 }
 
 export interface DeviceSelection {
@@ -56,7 +66,7 @@ export interface DeviceSelection {
 export function micConstraints(
   deviceId: string | undefined,
   idealSampleRateHz: number,
-): MediaTrackConstraints {
+): MicTrackConstraints {
   return {
     ...(deviceId === undefined || deviceId === ""
       ? {}
@@ -64,6 +74,7 @@ export function micConstraints(
     echoCancellation: true,
     noiseSuppression: true,
     autoGainControl: true,
+    voiceIsolation: true,
     channelCount: 1,
     sampleRate: { ideal: idealSampleRateHz },
   };
@@ -85,10 +96,29 @@ export async function openMicStream(
   deviceId: string | undefined,
   idealSampleRateHz: number,
 ): Promise<MediaStream> {
-  return navigator.mediaDevices.getUserMedia({
-    audio: micConstraints(deviceId, idealSampleRateHz),
-    video: false,
-  });
+  const constraints = micConstraints(deviceId, idealSampleRateHz);
+  try {
+    return await navigator.mediaDevices.getUserMedia({
+      audio: constraints,
+      video: false,
+    });
+  } catch (error) {
+    if (!isConstraintRejection(error)) {
+      throw error;
+    }
+    const plain: MicTrackConstraints = { ...constraints };
+    delete plain.voiceIsolation;
+    return navigator.mediaDevices.getUserMedia({ audio: plain, video: false });
+  }
+}
+
+/** Unknown/unsupported constraint (`OverconstrainedError`/`TypeError`). */
+function isConstraintRejection(error: unknown): boolean {
+  return (
+    typeof DOMException !== "undefined" &&
+    error instanceof DOMException &&
+    (error.name === "OverconstrainedError" || error.name === "TypeError")
+  );
 }
 
 /**
@@ -97,10 +127,12 @@ export async function openMicStream(
  */
 export function readProcessingSettings(track: MediaStreamTrack): ProcessingSettings {
   const settings = track.getSettings();
+  const voiceIsolation = "voiceIsolation" in settings && settings.voiceIsolation === true;
   return {
     echoCancellation: settings.echoCancellation === true,
     noiseSuppression: settings.noiseSuppression === true,
     autoGainControl: settings.autoGainControl === true,
+    voiceIsolation,
   };
 }
 

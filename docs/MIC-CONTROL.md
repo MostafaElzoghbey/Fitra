@@ -35,8 +35,8 @@ only; students keep talking to each other).
 
 | Event | Who | Server rule |
 |---|---|---|
-| `mic-open` | any | If `forcedMuted` → `error{mic-forced-muted}` to sender, mic stays closed. Else set `micOpen=true`, broadcast `mic-changed{pid,true}`, pre-warm this speaker's pipe set (session-status flows before first frame). |
-| `mic-close` | any | If open: set `micOpen=false`, broadcast `mic-changed{pid,false}`, flush provider input (`audioStreamEnd`) and release this speaker's sessions after flush — the translated tail keeps playing (never cancelled). If already closed: no-op. |
+| `mic-open` | any | If `forcedMuted` → `error{mic-forced-muted}` to sender, mic stays closed. Else set `micOpen=true`, record the announced capture `epoch`, broadcast `mic-changed{pid,true}`, pre-warm this speaker's pipe set for that epoch (session-status flows before first frame). |
+| `mic-close` | any | If open: set `micOpen=false`, broadcast `mic-changed{pid,false}`, flush provider input (`audioStreamEnd`) and put this speaker's epoch sessions into **drain**: the translated tail keeps playing until 1.2 s of output silence (hard cap 4 s), then the sessions retire. If already closed: no-op. |
 | `mute{pid}` | teacher | Set target pid's `forcedMuted=true`. If their mic is open: cut it — `micOpen=false`, flush + release pipes, broadcast `mic-changed{pid,false}`. Broadcast full `roster` (forcedMuted flag visible). Unknown/absent student pid → `error{mute-absent}` to teacher, no change. |
 | `mute-all` | teacher | Every student: `forcedMuted=true`; open mics cut as above; `muteAllActive=true`. One `roster` broadcast + one `mic-changed{pid,false}` per participant that actually had an open mic. |
 | `unmute {pid}` | teacher | `forcedMuted=false`; `roster` broadcast. Does NOT open their mic — the student still decides. |
@@ -50,6 +50,12 @@ only; students keep talking to each other).
 - **Force-mute cuts, it does not delete**: a cut speaker's in-flight provider
   input flushes (`audioStreamEnd`) so already-captured speech still translates
   as a tail; listeners hear the tail; nothing is interrupted mid-playback.
+- **Epoch = capture generation**: each `mic-open` announces a new `epoch`.
+  Uplink frames are accepted only for the current epoch, and every provider
+  session is keyed by `(speaker, src, tgt, epoch)`. A re-open therefore opens
+  fresh provider sessions; a drained old session can never leak stale speech
+  into the new capture. Listeners key playback by `(speaker, epoch)` and drop
+  the old epoch once the new one produces audio.
 - **Self-hearing: never** — the DO excludes the speaker's own socket from
   every pipe fan-out, even if languages match (FR-015 unchanged).
 - **Concurrent speakers**: two students can both hold `micOpen=true`; each is

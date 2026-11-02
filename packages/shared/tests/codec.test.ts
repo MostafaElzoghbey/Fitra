@@ -27,7 +27,7 @@ describe("audio frame codec (PROTOCOL.md section 2)", () => {
       payload,
     });
     expect(encoded.length).toBe(8 + payload.length);
-    // Bit-exact LE header: ver | type | seq u16 LE | speaker u16 LE | reserved u16 LE
+    // Bit-exact LE header: ver | type | seq u16 LE | speaker u16 LE | epoch u16 LE
     expect(Array.from(encoded.subarray(0, 8))).toEqual([0x01, 0x01, 42, 0, 0, 0, 0, 0]);
     const decoded = decodeAudioFrame(encoded);
     expect(decoded.version).toBe(0x01);
@@ -51,6 +51,23 @@ describe("audio frame codec (PROTOCOL.md section 2)", () => {
     const decoded = decodeAudioFrame(encoded);
     expect(decoded).toMatchObject({ version: 0x01, type: 0x02, seq: 0x0201, speaker: 0x0403 });
     expect(Array.from(decoded.payload)).toEqual([9, 8, 7]);
+  });
+
+  it("round-trips a non-zero epoch and rejects out-of-range values", () => {
+    const encoded = encodeAudioFrame({
+      type: 0x01,
+      seq: 7,
+      speaker: 2,
+      epoch: 0x1234,
+      payload: payloadOf(0xaa),
+    });
+    expect(Array.from(encoded.subarray(6, 8))).toEqual([0x34, 0x12]);
+    expect(decodeAudioFrame(encoded).epoch).toBe(0x1234);
+    for (const epoch of [-1, 0x10000, 1.5]) {
+      expect(() =>
+        encodeAudioFrame({ type: 0x01, seq: 0, speaker: 0, epoch, payload: payloadOf() }),
+      ).toThrow(RangeError);
+    }
   });
 
   it("round-trips empty payloads", () => {

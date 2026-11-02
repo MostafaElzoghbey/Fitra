@@ -45,13 +45,23 @@ function makeManager(
   opts: { idleCloseMs?: number; maxSessions?: number } = {},
 ) {
   const { events, onSessionStatus } = statusCollector();
-  const audio: Array<{ pair: string; speakerIndex: number; pcm: ArrayBuffer }> = [];
+  const audio: Array<{
+    pair: string;
+    speakerIndex: number;
+    epoch: number;
+    pcm: ArrayBuffer;
+  }> = [];
   const manager = new SessionManager(provider, {
     idleCloseMs: opts.idleCloseMs,
     maxSessions: opts.maxSessions,
     onSessionStatus,
-    onAudio: (pair: string, speakerIndex: number, pcm: ArrayBuffer) => {
-      audio.push({ pair, speakerIndex, pcm: pcm.slice(0) });
+    onAudio: (
+      pair: string,
+      speakerIndex: number,
+      epoch: number,
+      pcm: ArrayBuffer,
+    ) => {
+      audio.push({ pair, speakerIndex, epoch, pcm: pcm.slice(0) });
     },
   });
   return { manager, events, audio };
@@ -242,6 +252,23 @@ describe("SessionManager (T-008)", () => {
     expect(got.degraded).toBe(false);
     expect(audio).toHaveLength(0);
   });
+
+  it("keys sessions by epoch so a re-open never reuses the previous microphone", async () => {
+    const provider = new CountingFake({ delayMs: 5 });
+    const { manager, audio } = makeManager(provider);
+    const first = manager.acquire(0, "ar", "en", "listener", { epoch: 1 });
+    await vi.advanceTimersByTimeAsync(10);
+    const second = manager.acquire(0, "ar", "en", "listener", { epoch: 2 });
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(provider.openCalls).toBe(2);
+    expect(second.session).not.toBe(first.session);
+
+    first.session.sendInputAudio(new Uint8Array([1, 0]).buffer as ArrayBuffer);
+    second.session.sendInputAudio(new Uint8Array([2, 0]).buffer as ArrayBuffer);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(audio.map((a) => a.epoch)).toEqual([1, 2]);
+  });
 });
 
 describe("per-speaker flush + teardown (T-028 mic model)", () => {
@@ -316,7 +343,7 @@ describe("per-speaker flush + teardown (T-028 mic model)", () => {
     await vi.advanceTimersByTimeAsync(10);
 
     manager.closeSpeakerPipes(1);
-    // Speaker 1's pipe: idle-close fires after the window, speaker 0 untouched.
+    // Speaker 1's pipe drains and retires; speaker 0 stays untouched.
     await vi.advanceTimersByTimeAsync(60_000);
     expect(provider.openCalls).toBe(2);
     const reborn = manager.acquire(1, "ar", "en", "listener-s2");
@@ -328,19 +355,63 @@ describe("per-speaker flush + teardown (T-028 mic model)", () => {
     expect(provider.openCalls).toBe(3);
   });
 
-  it("closeSpeakerPipes keeps the pipe warm inside the idle window (tail drains)", async () => {
-    const provider = new CountingFake({ delayMs: 5 });
-    const { manager, audio } = makeManager(provider, { idleCloseMs: 60_000 });
+  it("closeSpeakerPipes drains the pipe, then a later acquire reopens it", async () => {
+    const provider = new ScriptedProvider();
+    const manager = new SessionManager(provider, { idleCloseMs: 60_000 });
     const b = manager.acquire(1, "ar", "en", "listener-s");
-    await vi.advanceTimersByTimeAsync(10);
+    await vi.advanceTimersByTimeAsync(0);
+    provider.events?.onStatus("live");
     manager.closeSpeakerPipes(1);
-    // Within the window a new listener re-uses the warm pipe (tail still flows).
+    expect(provider.endInputCalls).toBe(1);
+
+    // During the drain window the tail still reaches a new listener.
     const warm = manager.acquire(1, "ar", "en", "listener-s2");
     expect(warm.session).toBe(b.session);
-    expect(provider.openCalls).toBe(1);
-    b.session.sendInputAudio(new Uint8Array([5, 6]).buffer as ArrayBuffer);
-    await vi.advanceTimersByTimeAsync(10);
-    expect(audio.map((a) => a.pair)).toEqual(["1:ar->en"]);
+    expect(provider.calls.length).toBe(1);
+
+    // Quiet for the drain window retires the epoch; a later acquire reopens.
+    await vi.advanceTimersByTimeAsync(1_200);
+    const fresh = manager.acquire(1, "ar", "en", "listener-s3");
+    expect(provider.calls.length).toBe(2);
+    expect(fresh.session).not.toBe(b.session);
+  });
+
+  it("does not retire an epoch whose provider is still opening", async () => {
+    const control: { resolve: (() => void) | null } = { resolve: null };
+    let openCalls = 0;
+    const provider: TranslationProvider = {
+      name: "fake",
+      openSession: (sourceLang, targetLang, ev) => {
+        openCalls += 1;
+        const session: TranslationSession = {
+          sourceLang,
+          targetLang,
+          sendInputAudio: () => undefined,
+          endInput: () => undefined,
+          close: () => undefined,
+        };
+        return new Promise((resolve) => {
+          control.resolve = () => {
+            ev.onStatus("live");
+            resolve(session);
+          };
+        });
+      },
+      closeAll: () => Promise.resolve(),
+    };
+
+    const manager = new SessionManager(provider, {});
+    const acquired = manager.acquire(1, "ar", "en", "l");
+    manager.closeSpeakerPipes(1);
+    await vi.advanceTimersByTimeAsync(1_300);
+    expect(manager.acquire(1, "ar", "en", "l2").session).toBe(acquired.session);
+    expect(openCalls).toBe(1);
+
+    control.resolve?.();
+    await vi.advanceTimersByTimeAsync(1_300);
+    const fresh = manager.acquire(1, "ar", "en", "l3");
+    expect(openCalls).toBe(2);
+    expect(fresh.session).not.toBe(acquired.session);
   });
 
   it("release() still works per listener alongside closeSpeakerPipes", async () => {

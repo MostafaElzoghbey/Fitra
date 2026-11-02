@@ -86,6 +86,9 @@ end to end as early as possible.
 - **FR-013** Force-muting an open mic cuts it immediately: provider input is
   flushed (`audioStreamEnd`) so already-captured speech still translates as a
   tail; listeners keep hearing the tail; nothing is cancelled mid-playback.
+  The closed capture epoch then retires (1.2 s quiet, 4 s cap); a later
+  `mic-open` starts a new epoch, so speech captured before the close is never
+  replayed.
 - **FR-014** Mic state lives only in DO memory (never persisted); every join
   or rejoin starts with the mic closed.
 - **FR-015** A speaker never receives the translated audio of their own

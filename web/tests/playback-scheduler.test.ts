@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { FITRA_AUDIO_TYPE_DOWNLINK, FITRA_AUDIO_VERSION } from "@fitra/shared";
 import type { DecodedAudioFrame } from "@fitra/shared";
@@ -7,6 +7,7 @@ import {
   PlaybackScheduler,
   SpeakerMixer,
   createMixer,
+  isNewerEpoch,
 } from "../src/audio/playback.js";
 
 class FakeParam {
@@ -74,12 +75,13 @@ function packet(seq: number): { seq: number; pcm24k: Uint8Array } {
   return { seq, pcm24k: new Uint8Array(4800) };
 }
 
-function frame(seq: number, speaker: number): DecodedAudioFrame {
+function frame(seq: number, speaker: number, epoch = 0): DecodedAudioFrame {
   return {
     version: FITRA_AUDIO_VERSION,
     type: FITRA_AUDIO_TYPE_DOWNLINK,
     seq,
     speaker,
+    epoch,
     payload: new Uint8Array(4800),
   };
 }
@@ -95,6 +97,50 @@ describe("PlaybackScheduler burst handling", () => {
     expect(scheduler.stats.framesPlayed).toBe(30);
     expect(scheduler.stats.overruns).toBe(0);
     scheduler.dispose();
+  });
+});
+
+describe("PlaybackScheduler pre-roll", () => {
+  it("plays a short tail instead of stalling when pre-roll is never met", () => {
+    vi.useFakeTimers();
+    try {
+      const ctx = new FakeAudioContext();
+      const scheduler = new PlaybackScheduler(ctx as unknown as AudioContext);
+      scheduler.pushPacket(packet(0));
+      expect(scheduler.stats.framesPlayed).toBe(0);
+
+      vi.advanceTimersByTime(100);
+      expect(scheduler.stats.framesPlayed).toBe(1);
+      scheduler.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("capture epochs (PROTOCOL §2)", () => {
+  it("treats a wrapped epoch as newer and a stale one as older", () => {
+    expect(isNewerEpoch(0, 1)).toBe(true);
+    expect(isNewerEpoch(65535, 0)).toBe(true);
+    expect(isNewerEpoch(0, 65535)).toBe(false);
+    expect(isNewerEpoch(7, 7)).toBe(false);
+  });
+
+  it("drops the old epoch and ignores late frames from it", () => {
+    const ctx = new FakeAudioContext();
+    const mixer = new SpeakerMixer(ctx as unknown as AudioContext);
+    for (let seq = 0; seq < 4; seq += 1) mixer.demux(frame(seq, 0, 0));
+    expect(mixer.stats.framesPlayed).toBe(4);
+
+    for (let seq = 0; seq < 4; seq += 1) mixer.demux(frame(seq, 0, 1));
+    expect(mixer.stats.framesPlayed).toBe(4);
+
+    mixer.demux(frame(4, 0, 0));
+    expect(mixer.stats.framesPlayed).toBe(4);
+
+    mixer.demux(frame(4, 0, 1));
+    expect(mixer.stats.framesPlayed).toBe(5);
+    mixer.dispose();
   });
 });
 

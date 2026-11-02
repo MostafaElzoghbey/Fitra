@@ -41,6 +41,10 @@ export const PLAYBACK_FRAME_MS_NOMINAL = 100;
 /** Buffered audio required before the first source is scheduled. */
 export const PLAYBACK_PRE_ROLL_MS = 400;
 
+/** Re-check interval while the pre-roll is not yet satisfied, so a short
+ * utterance tail is played instead of waiting forever for more packets. */
+export const PLAYBACK_PRE_ROLL_RETRY_MS = 100;
+
 /** Max audio kept in the *unscheduled* queue. Audio already scheduled on the
  * audio clock is never shed: providers may deliver a whole turn in one burst,
  * and dropping the horizon cut translations mid-sentence (T-026). */
@@ -142,6 +146,7 @@ export class PlaybackScheduler {
   private expectedSeq: number | null = null;
   private nextTime: number | null = null;
   private emptyTimer: ReturnType<typeof setTimeout> | null = null;
+  private preRollTimer: ReturnType<typeof setTimeout> | null = null;
   private framesPlayedCount = 0;
   private gapsCount = 0;
   private overrunsCount = 0;
@@ -220,6 +225,7 @@ export class PlaybackScheduler {
     }
     this.disposed = true;
     this.clearEmptyTimer();
+    this.clearPreRollTimer();
     for (const node of this.liveNodes) {
       try {
         node.stop();
@@ -266,7 +272,7 @@ export class PlaybackScheduler {
     }
   }
 
-  private pump(): void {
+  private pump(forceStart = false): void {
     if (this.disposed) {
       return;
     }
@@ -274,9 +280,11 @@ export class PlaybackScheduler {
     const now = this.ctx.currentTime;
     if (this.nextTime === null) {
       const preRollSamples = (PLAYBACK_PRE_ROLL_MS / 1000) * PLAYBACK_SAMPLE_RATE_HZ;
-      if (this.pendingSamples() < preRollSamples) {
+      if (!forceStart && this.pendingSamples() < preRollSamples) {
+        this.armPreRollTimer();
         return;
       }
+      this.clearPreRollTimer();
       this.nextTime = now + PLAYBACK_START_LEAD_SEC;
     }
     let cursor = this.nextTime < now ? now : this.nextTime;
@@ -310,6 +318,26 @@ export class PlaybackScheduler {
     if (this.emptyTimer !== null) {
       clearTimeout(this.emptyTimer);
       this.emptyTimer = null;
+    }
+  }
+
+  private armPreRollTimer(): void {
+    if (this.disposed || this.preRollTimer !== null) {
+      return;
+    }
+    this.preRollTimer = setTimeout(() => {
+      this.preRollTimer = null;
+      if (this.disposed || this.pending.length === 0) {
+        return;
+      }
+      this.pump(true);
+    }, PLAYBACK_PRE_ROLL_RETRY_MS);
+  }
+
+  private clearPreRollTimer(): void {
+    if (this.preRollTimer !== null) {
+      clearTimeout(this.preRollTimer);
+      this.preRollTimer = null;
     }
   }
 
@@ -365,35 +393,72 @@ export interface AudioDemuxer {
   readonly stats: PlaybackStats;
 }
 
+const PLAYBACK_EPOCH_MOD = 65536;
+
+/** Wrap-aware: is `incoming` a later capture generation than `current`? */
+export function isNewerEpoch(current: number, incoming: number): boolean {
+  const distance = (incoming - current + PLAYBACK_EPOCH_MOD) % PLAYBACK_EPOCH_MOD;
+  return distance !== 0 && distance < PLAYBACK_EPOCH_MOD / 2;
+}
+
 /**
  * Per-speaker playback: PROTOCOL §2 assigns downlink `seq` per (listener,
- * speaker-pipe), so parallel speakers must not share one gap/PLC cursor.
- * Each speaker index gets its own scheduler against one shared AudioContext;
- * the browser mixes their master gains.
+ * speaker-pipe, epoch), so parallel speakers — and successive capture epochs
+ * of the same speaker — must not share one gap/PLC cursor. Each
+ * `(speaker, epoch)` gets its own scheduler against one shared AudioContext.
+ * A newer epoch for a speaker disposes the older schedulers, so a stale tail
+ * can never play after the speaker re-opens their mic.
  */
 export class SpeakerMixer implements AudioDemuxer {
   private readonly ctx: AudioContext;
-  private readonly speakers = new Map<number, PlaybackScheduler>();
+  private readonly speakers = new Map<number, Map<number, PlaybackScheduler>>();
+  private readonly latestEpoch = new Map<number, number>();
 
   constructor(ctx: AudioContext) {
     this.ctx = ctx;
   }
 
   demux(frame: DecodedAudioFrame): void {
-    let scheduler = this.speakers.get(frame.speaker);
+    const latest = this.latestEpoch.get(frame.speaker);
+    if (latest === undefined) {
+      this.latestEpoch.set(frame.speaker, frame.epoch);
+    } else if (frame.epoch !== latest) {
+      if (!isNewerEpoch(latest, frame.epoch)) {
+        return;
+      }
+      this.dropOlderEpochs(frame.speaker, frame.epoch);
+      this.latestEpoch.set(frame.speaker, frame.epoch);
+    }
+
+    let byEpoch = this.speakers.get(frame.speaker);
+    if (byEpoch === undefined) {
+      byEpoch = new Map<number, PlaybackScheduler>();
+      this.speakers.set(frame.speaker, byEpoch);
+    }
+    let scheduler = byEpoch.get(frame.epoch);
     if (scheduler === undefined) {
       scheduler = new PlaybackScheduler(this.ctx);
-      this.speakers.set(frame.speaker, scheduler);
+      byEpoch.set(frame.epoch, scheduler);
     }
     scheduler.pushPacket(downlinkPacketFromFrame(frame));
   }
 
+  private dropOlderEpochs(speaker: number, keepEpoch: number): void {
+    const byEpoch = this.speakers.get(speaker);
+    if (byEpoch === undefined) return;
+    for (const [epoch, scheduler] of byEpoch) {
+      if (epoch === keepEpoch) continue;
+      scheduler.dispose();
+      byEpoch.delete(epoch);
+    }
+  }
+
   prune(liveSpeakerIndexes: ReadonlySet<number>): void {
-    for (const [speaker, scheduler] of this.speakers) {
-      if (!liveSpeakerIndexes.has(speaker)) {
-        scheduler.dispose();
-        this.speakers.delete(speaker);
-      }
+    for (const [speaker, byEpoch] of this.speakers) {
+      if (liveSpeakerIndexes.has(speaker)) continue;
+      for (const scheduler of byEpoch.values()) scheduler.dispose();
+      this.speakers.delete(speaker);
+      this.latestEpoch.delete(speaker);
     }
   }
 
@@ -405,22 +470,25 @@ export class SpeakerMixer implements AudioDemuxer {
       underruns: 0,
       bufferedMs: 0,
     };
-    for (const scheduler of this.speakers.values()) {
-      const s = scheduler.stats;
-      total.framesPlayed += s.framesPlayed;
-      total.gaps += s.gaps;
-      total.overruns += s.overruns;
-      total.underruns += s.underruns;
-      total.bufferedMs += s.bufferedMs;
+    for (const byEpoch of this.speakers.values()) {
+      for (const scheduler of byEpoch.values()) {
+        const s = scheduler.stats;
+        total.framesPlayed += s.framesPlayed;
+        total.gaps += s.gaps;
+        total.overruns += s.overruns;
+        total.underruns += s.underruns;
+        total.bufferedMs += s.bufferedMs;
+      }
     }
     return total;
   }
 
   dispose(): void {
-    for (const scheduler of this.speakers.values()) {
-      scheduler.dispose();
+    for (const byEpoch of this.speakers.values()) {
+      for (const scheduler of byEpoch.values()) scheduler.dispose();
     }
     this.speakers.clear();
+    this.latestEpoch.clear();
   }
 }
 

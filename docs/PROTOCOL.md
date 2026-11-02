@@ -30,8 +30,8 @@ M0-stable: M2 auth mints the same join token claims without changing it (FR-003)
 +------+------+------+------+------+------+------+------+
 | ver  | type |        seq u16        |   speaker u16   |
 +------+------+------+------+------+------+------+------+
-| payload: PCM16LE mono (no header)                     |
-+-------------------------------------------------------+
+|              epoch u16                | payload ...   |
++------+------+------+------+------+------+------+------+
 ```
 
 | Field | Bytes | Value |
@@ -40,13 +40,27 @@ M0-stable: M2 auth mints the same join token claims without changing it (FR-003)
 | `type` | 1 | `0x01` client→DO (16 kHz input); `0x02` DO→client (24 kHz output) |
 | `seq` | 2 | Per-sender monotonic counter, wraps; gap = loss metric |
 | `speaker` | 2 | `participantIndex` assigned at join (0 = teacher). Uplink: the sender's own index. Downlink: the **source** speaker the translated audio belongs to (clients demultiplex parallel pipes by this field) |
+| `epoch` | 2 | Capture-utterance generation, wraps. Uplink: the epoch of the `mic-open` that produced this frame. Downlink: the epoch of the input that produced this audio (same-language relay copies it). `0` is the legacy/unspecified epoch |
 | payload | N | 3 200 B nominal (100 ms @16 kHz) uplink; downlink is 24 kHz in 100 ms nominal units (4 800 B), but translated turns arrive in arbitrary chunk sizes so the DO splits them into ≤8 KiB frames; same-language relay is resampled 16→24 kHz and re-wrapped as `0x02` |
 
 Rules: max frame 8 KiB (larger → drop + `error`); unknown `ver` → drop +
 `error`; sequence gaps tolerated (jitter buffer), never retransmitted. Downlink
-`seq` is per (listener, speaker-pipe): each source speaker's stream keeps an
-independent monotonic cursor at the client, because multiple speakers may fan
-out concurrently into the same socket.
+`seq` is per (listener, speaker-pipe, **epoch**): each source speaker's stream
+keeps an independent monotonic cursor at the client, because multiple speakers
+may fan out concurrently into the same socket. A new epoch starts its cursor at
+`0`, so the client can key its jitter queue by `(speaker, epoch)`.
+
+**Epoch semantics (tail + stale-speech fix).** A client increments `epoch` on
+every `mic-open` and stamps every uplink frame of that capture span with it.
+The DO accepts only frames whose `epoch` equals the epoch announced by the
+sender's latest `mic-open`; anything else is a stale frame and is dropped. On
+`mic-close` the DO flushes the provider input for that epoch, keeps the
+provider session alive only until its already-translated tail has drained
+(1.2 s of output silence, hard cap 4 s), then retires the session. A re-open
+therefore gets a **fresh provider session for the new epoch**, so old context
+can never resurface as speech. Listeners demultiplex downlink audio by
+`(speaker, epoch)` and discard an older epoch as soon as audio for a newer
+epoch of the same speaker arrives.
 
 ## 3. JSON control messages
 
@@ -71,8 +85,8 @@ interface RosterEntry {
 }
 
 type ClientMsg =
-  | { t: "mic-open" }                       // any role; a force-muted student gets an error
-  | { t: "mic-close" }                      // any role
+  | { t: "mic-open"; epoch?: number }       // any role; epoch = capture generation (u16, default 0)
+  | { t: "mic-close"; epoch?: number }      // any role; epoch = the generation being closed
   | { t: "mute-all" }                       // teacher only: force-mute EVERY student
   | { t: "unmute-all" }                     // teacher only: clear every student force-mute
   | { t: "mute"; participantId: string }    // teacher only: force-mute one student
@@ -135,9 +149,12 @@ reports itself instead of dropping input silently (NFR-001).
   source. Caption slots are keyed by `speaker`, not globally: two concurrent
   speakers each own their live slot and commit independently.
 - `mic-close` flushes the provider input (`realtimeInput.audioStreamEnd`)
-  so speech captured before the button was released is translated. Mic state
-  changes never cancel in-flight translated audio (the tail keeps flowing);
-  the client NEVER interrupts its own playback on mic or roster changes —
+  so speech captured before the button was released is translated. The
+  provider session then enters a **drain** state: its already-generated tail
+  keeps flowing until output has been silent for 1.2 s (hard cap 4 s), after
+  which the session is retired. Mic state changes never cancel in-flight
+  translated audio (the tail keeps flowing); the client NEVER interrupts its
+  own playback on mic or roster changes —
   each pipe drains on the audio clock independently.
 - A `mic-changed` frame with `micOpen:false` for speaker S is a turn boundary
   ONLY for S's caption slots: the client commits S's current live turn even if

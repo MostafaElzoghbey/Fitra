@@ -5,7 +5,7 @@
 //   byte 1:    type (0x01 client->DO @16kHz, 0x02 DO->client @24kHz)
 //   bytes 2-3: seq u16 LE (per-sender monotonic, wraps at 65535)
 //   bytes 4-5: speaker u16 LE (participantIndex assigned at join)
-//   bytes 6-7: reserved u16 LE (always zero)
+//   bytes 6-7: epoch u16 LE (capture generation; 0 = legacy/unspecified)
 //   bytes 8+:  payload (PCM16LE mono, no header)
 
 export const FITRA_AUDIO_HEADER_BYTES = 8;
@@ -35,6 +35,8 @@ export interface EncodeAudioFrameParams {
   readonly type: AudioFrameType;
   readonly seq: number;
   readonly speaker: number;
+  /** Capture generation (u16). Omitted = 0 (legacy/unspecified). */
+  readonly epoch?: number;
   readonly payload: Uint8Array;
 }
 
@@ -43,6 +45,8 @@ export interface DecodedAudioFrame {
   readonly type: AudioFrameType;
   readonly seq: number;
   readonly speaker: number;
+  /** Capture generation (u16). 0 = legacy/unspecified. */
+  readonly epoch: number;
   readonly payload: Uint8Array;
 }
 
@@ -72,6 +76,8 @@ export function encodeAudioFrame(params: EncodeAudioFrameParams): Uint8Array {
   assertFrameType(params.type);
   assertU16("seq", params.seq);
   assertU16("speaker", params.speaker);
+  const epoch = params.epoch ?? 0;
+  assertU16("epoch", epoch);
   if (params.payload.length > FITRA_AUDIO_MAX_PAYLOAD_BYTES) {
     throw new CodecError(
       "frame-too-large",
@@ -85,7 +91,7 @@ export function encodeAudioFrame(params: EncodeAudioFrameParams): Uint8Array {
   view.setUint8(1, params.type);
   view.setUint16(2, params.seq, true);
   view.setUint16(4, params.speaker, true);
-  view.setUint16(6, 0, true);
+  view.setUint16(6, epoch, true);
   out.set(params.payload, FITRA_AUDIO_HEADER_BYTES);
   return out;
 }
@@ -135,11 +141,13 @@ export function decodeAudioFrame(bytes: Uint8Array): DecodedAudioFrame {
   }
   const seq = view.getUint16(2, true);
   const speaker = view.getUint16(4, true);
+  const epoch = view.getUint16(6, true);
   return {
     version,
     type: rawType,
     seq,
     speaker,
+    epoch,
     payload: bytes.slice(FITRA_AUDIO_HEADER_BYTES),
   };
 }

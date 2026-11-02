@@ -20,14 +20,17 @@ import {
   CAPTURE_BACKPRESSURE_BYTES,
   CAPTURE_FRAME_MS,
   CAPTURE_FRAME_SAMPLES,
+  CAPTURE_HIGH_PASS_HZ,
   CAPTURE_PCM16_SCALE,
   CAPTURE_SAMPLE_RATE_HZ,
   AudioFrameSender,
   type FrameSocket,
   createAudioInjector,
   createDownsampleState,
+  createHighPassState,
   downsampleLinear,
   framePack,
+  highPassSample,
   injectAudioRequested,
   writeSine,
 } from "../src/audio/capture.js";
@@ -544,5 +547,30 @@ describe("injection seam (?injectAudio=1, T-016 / OQ-10)", () => {
     await new Promise((resolve) => setTimeout(resolve, 150));
     injector.stop();
     expect(socket.sent[0]?.length).toBe(FITRA_AUDIO_HEADER_BYTES + CAPTURE_FRAME_SAMPLES * 2);
+  });
+});
+
+describe("one-pole high-pass (CAPTURE_HIGH_PASS_HZ)", () => {
+  it("removes DC while passing a speech-band tone", () => {
+    const dc = createHighPassState(CAPTURE_SAMPLE_RATE_HZ);
+    let last = 0;
+    for (let i = 0; i < CAPTURE_FRAME_SAMPLES; i += 1) {
+      last = highPassSample(dc, 0.5);
+    }
+    expect(Math.abs(last)).toBeLessThan(0.001);
+
+    const tone = createHighPassState(CAPTURE_SAMPLE_RATE_HZ);
+    let peak = 0;
+    for (let i = 0; i < CAPTURE_FRAME_SAMPLES; i += 1) {
+      const input = Math.sin((2 * Math.PI * 1000 * i) / CAPTURE_SAMPLE_RATE_HZ);
+      peak = Math.max(peak, Math.abs(highPassSample(tone, input)));
+    }
+    expect(peak).toBeGreaterThan(0.9);
+  });
+
+  it("rejects non-positive rates", () => {
+    expect(() => createHighPassState(0)).toThrow(RangeError);
+    expect(() => createHighPassState(CAPTURE_SAMPLE_RATE_HZ, 0)).toThrow(RangeError);
+    expect(CAPTURE_HIGH_PASS_HZ).toBe(90);
   });
 });

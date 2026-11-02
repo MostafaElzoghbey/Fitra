@@ -26,10 +26,13 @@ export type SessionStatusCallback = (
   attempt: number,
 ) => void;
 
-/** Audio sink per pipe; the DO fans these chunks out to the pipe's listeners. */
+/** Audio sink per pipe; the DO fans these chunks out to the pipe's listeners.
+ * `epoch` is the capture generation that produced the chunk, so the DO can
+ * stamp downlink frames and listeners can discard stale generations. */
 export type SessionAudioCallback = (
   pair: string,
   speakerIndex: number,
+  epoch: number,
   pcm: ArrayBuffer,
 ) => void;
 
@@ -58,6 +61,8 @@ export interface SessionManagerOptions {
 
 export interface AcquireOptions {
   readonly isTeacherLeg?: boolean;
+  /** Capture generation; a new epoch gets a fresh provider session. */
+  readonly epoch?: number;
 }
 
 export interface AcquireResult {
@@ -67,6 +72,11 @@ export interface AcquireResult {
 
 export const DEFAULT_MAX_SESSIONS = 8;
 export const DEFAULT_IDLE_CLOSE_MS = 60_000;
+/** Output silence after `endInput` that marks a drained turn complete. */
+export const DRAIN_QUIET_MS = 1_200;
+/** Hard cap on drain time; a provider that never stops emitting is retired. */
+export const DRAIN_MAX_MS = 4_000;
+const DRAIN_POLL_MS = 150;
 export const MAX_RECONNECT_ATTEMPTS = 5;
 const RECONNECT_BASE_MS = 250;
 const RECONNECT_CAP_MS = 5_000;
@@ -81,6 +91,11 @@ export function pipeKey(
   targetLang: Lang,
 ): string {
   return `${speakerIndex}:${sourceLang}->${targetLang}`;
+}
+
+/** Internal map key: the wire pipe key plus its capture generation. */
+export function entryKey(baseKey: string, epoch: number): string {
+  return `${baseKey}#${epoch}`;
 }
 
 // DO-alarm-safe discipline (ARCHITECTURE.md §3): one-shot setTimeout chains
@@ -160,6 +175,9 @@ type ProviderLiveStatus = "connecting" | "live" | "reconnecting";
 
 interface SessionEntry {
   readonly key: string;
+  /** Wire-visible pair (`speaker:src->tgt`), shared by every epoch. */
+  readonly baseKey: string;
+  readonly epoch: number;
   readonly speakerIndex: number;
   readonly sourceLang: Lang;
   readonly targetLang: Lang;
@@ -183,6 +201,12 @@ interface SessionEntry {
   generation: number;
   idleTimer: CancellableTimer | null;
   reconnectTimer: CancellableTimer | null;
+  /** Wall-clock time of the latest provider audio chunk (drain criterion). */
+  lastAudioAtMs: number;
+  draining: boolean;
+  drainStartedMs: number;
+  inputEnded: boolean;
+  drainTimer: CancellableTimer | null;
 }
 
 function anyTeacherLeg(listeners: Map<string, boolean>): boolean {
@@ -238,8 +262,9 @@ export class SessionManager {
   snapshotSessions(): { pair: string; status: string; reconnects: number }[] {
     const out: { pair: string; status: string; reconnects: number }[] = [];
     for (const entry of this.entries.values()) {
+      if (entry.draining) continue;
       out.push({
-        pair: entry.key,
+        pair: entry.baseKey,
         status: entry.status,
         reconnects: entry.reconnects,
       });
@@ -255,8 +280,10 @@ export class SessionManager {
     opts: AcquireOptions = {},
   ): AcquireResult {
     const key = pipeKey(speakerIndex, sourceLang, targetLang);
+    const epoch = opts.epoch ?? 0;
+    const internalKey = entryKey(key, epoch);
     const isTeacherLeg = opts.isTeacherLeg ?? false;
-    const existing = this.entries.get(key);
+    const existing = this.entries.get(internalKey);
     if (existing !== undefined) {
       existing.listeners.set(listenerId, isTeacherLeg);
       existing.teacherLeg = anyTeacherLeg(existing.listeners);
@@ -270,7 +297,8 @@ export class SessionManager {
         this.openUnderlying(existing);
       } else if (
         existing.underlying === null &&
-        existing.reconnectTimer === null
+        existing.reconnectTimer === null &&
+        !existing.draining
       ) {
         // Dead with no retry pending (e.g. backoff was cancelled by an
         // idle arm that a re-acquire just cleared): reopen now.
@@ -280,14 +308,16 @@ export class SessionManager {
     }
     // Cap (FR-024): existing pipes are all kept — teacher-leg sessions are
     // never preempted and earliest-created hold their slots; the newcomer is
-    // degraded with a muted handle. Degraded acquires are stateless (no slot
-    // held) so a later acquire retries for a live session.
-    if (this.entries.size >= this.maxSessions) {
+    // degraded with a muted handle. A draining epoch is expendable: its tail
+    // already had its drain window, so evict the oldest one before degrading.
+    if (this.entries.size >= this.maxSessions && !this.evictOldestDraining()) {
       this.emit(key, "degraded", 0);
       return { session: new MutedSession(sourceLang, targetLang), degraded: true };
     }
     const entry: SessionEntry = {
-      key,
+      key: internalKey,
+      baseKey: key,
+      epoch,
       speakerIndex,
       sourceLang,
       targetLang,
@@ -306,15 +336,21 @@ export class SessionManager {
       generation: 0,
       idleTimer: null,
       reconnectTimer: null,
+      lastAudioAtMs: 0,
+      draining: false,
+      drainStartedMs: 0,
+      inputEnded: false,
+      drainTimer: null,
     };
     this.createdCounter += 1;
-    this.entries.set(key, entry);
+    this.entries.set(internalKey, entry);
     this.openUnderlying(entry);
     return { session: entry.handle, degraded: false };
   }
 
   release(listenerId: string): void {
     for (const entry of this.entries.values()) {
+      if (entry.draining) continue;
       if (!entry.listeners.delete(listenerId)) continue;
       entry.teacherLeg = anyTeacherLeg(entry.listeners);
       if (entry.listeners.size === 0) {
@@ -325,27 +361,27 @@ export class SessionManager {
 
   /** Flush buffered input on every open pair (speaker paused mid-sentence). */
   endInputAll(): void {
-    for (const entry of this.entries.values()) entry.underlying?.endInput();
+    for (const entry of this.entries.values()) this.endInput(entry);
   }
 
   /** Flush one speaker's pipes only (mic close): other speakers keep streaming. */
   flushSpeaker(speakerIndex: number): void {
     for (const entry of this.entries.values()) {
-      if (entry.speakerIndex === speakerIndex) entry.underlying?.endInput();
+      if (entry.speakerIndex === speakerIndex) this.endInput(entry);
     }
   }
 
   /**
-   * Tear down one speaker's pipes (force-mute / disconnect): release every
-   * listener ref and arm the idle close, so the already-translating tail
-   * drains inside the idle window instead of the pipe living forever.
+   * Drain one speaker's pipes (mic close / force-mute / disconnect): flush the
+   * provider input, keep forwarding the already-generated tail, and retire the
+   * session once output has been silent for {@link DRAIN_QUIET_MS} (hard cap
+   * {@link DRAIN_MAX_MS}). A later `mic-open` uses a new epoch and therefore a
+   * fresh provider session — stale context cannot resurface.
    */
   closeSpeakerPipes(speakerIndex: number): void {
     for (const entry of this.entries.values()) {
       if (entry.speakerIndex !== speakerIndex) continue;
-      entry.listeners.clear();
-      entry.teacherLeg = false;
-      this.armIdle(entry);
+      this.startDrain(entry);
     }
   }
 
@@ -354,6 +390,8 @@ export class SessionManager {
     for (const entry of this.entries.values()) {
       this.clearIdle(entry);
       this.clearReconnect(entry);
+      entry.drainTimer?.cancel();
+      entry.drainTimer = null;
       entry.generation += 1;
       entry.underlying?.close();
       entry.handle.attach(null);
@@ -362,8 +400,70 @@ export class SessionManager {
     return this.provider.closeAll();
   }
 
+  private endInput(entry: SessionEntry): void {
+    if (entry.inputEnded) return;
+    entry.inputEnded = true;
+    entry.underlying?.endInput();
+  }
+
+  private startDrain(entry: SessionEntry): void {
+    if (entry.draining) return;
+    entry.draining = true;
+    entry.drainStartedMs = Date.now();
+    this.clearIdle(entry);
+    this.clearReconnect(entry);
+    this.endInput(entry);
+    this.scheduleDrainCheck(entry);
+  }
+
+  private scheduleDrainCheck(entry: SessionEntry): void {
+    const gen = entry.generation;
+    entry.drainTimer = armTimer(DRAIN_POLL_MS, () => {
+      entry.drainTimer = null;
+      if (this.entries.get(entry.key) !== entry || entry.generation !== gen) return;
+      if (!entry.draining) return;
+      const now = Date.now();
+      const liveSince = entry.liveSinceMs;
+      // A close can arrive before setupComplete. The provider flushes its
+      // pre-live buffer when it goes live, so the quiet clock may only start
+      // once the session is live — otherwise a slow handshake loses the tail.
+      const quietBase = Math.max(entry.drainStartedMs, entry.lastAudioAtMs, liveSince ?? 0);
+      const quiet = liveSince !== null && now - quietBase >= DRAIN_QUIET_MS;
+      const capBase = Math.max(entry.drainStartedMs, liveSince ?? 0);
+      if (quiet || now - capBase >= DRAIN_MAX_MS) {
+        this.retire(entry);
+        return;
+      }
+      this.scheduleDrainCheck(entry);
+    });
+  }
+
+  private retire(entry: SessionEntry): void {
+    if (this.entries.get(entry.key) !== entry) return;
+    this.clearIdle(entry);
+    this.clearReconnect(entry);
+    entry.drainTimer?.cancel();
+    entry.drainTimer = null;
+    entry.generation += 1;
+    entry.underlying?.close();
+    entry.underlying = null;
+    entry.handle.attach(null);
+    this.entries.delete(entry.key);
+  }
+
+  private evictOldestDraining(): boolean {
+    let oldest: SessionEntry | null = null;
+    for (const entry of this.entries.values()) {
+      if (!entry.draining) continue;
+      if (oldest === null || entry.createdSeq < oldest.createdSeq) oldest = entry;
+    }
+    if (oldest === null) return false;
+    this.retire(oldest);
+    return true;
+  }
+
   private openUnderlying(entry: SessionEntry): void {
-    if (entry.opening) return;
+    if (entry.opening || entry.draining) return;
     entry.opening = true;
     entry.generation += 1;
     const gen = entry.generation;
@@ -414,16 +514,17 @@ export class SessionManager {
     return {
       onAudio: (pcm: ArrayBuffer) => {
         if (!this.isCurrent(entry, gen)) return;
-        this.onAudio?.(entry.key, entry.speakerIndex, pcm);
+        entry.lastAudioAtMs = Date.now();
+        this.onAudio?.(entry.baseKey, entry.speakerIndex, entry.epoch, pcm);
       },
       onTranscript: (kind, text, final) => {
         if (!this.isCurrent(entry, gen)) return;
-        this.onTranscript?.(entry.key, entry.speakerIndex, kind, text, final);
+        this.onTranscript?.(entry.baseKey, entry.speakerIndex, kind, text, final);
       },
       onGoAway: (timeLeftMs) => {
         if (!this.isCurrent(entry, gen)) return;
-        this.onGoAway?.(entry.key, entry.speakerIndex, timeLeftMs);
-        this.emit(entry.key, "reconnecting", entry.attempts);
+        this.onGoAway?.(entry.baseKey, entry.speakerIndex, timeLeftMs);
+        this.emit(entry.baseKey, "reconnecting", entry.attempts, entry);
       },
       onResumption: (handle) => {
         if (!this.isCurrent(entry, gen)) return;
@@ -438,12 +539,16 @@ export class SessionManager {
         if (s === "live") {
           entry.liveSinceMs = Date.now();
         }
-        this.emit(entry.key, s, entry.attempts);
+        this.emit(entry.baseKey, s, entry.attempts, entry);
       },
     };
   }
 
   private scheduleRetry(entry: SessionEntry): void {
+    if (entry.draining) {
+      this.retire(entry);
+      return;
+    }
     if (entry.liveSinceMs !== null && Date.now() - entry.liveSinceMs >= STABLE_LIVE_RESET_MS) {
       entry.attempts = 0;
     }
@@ -452,14 +557,14 @@ export class SessionManager {
       entry.terminallyFailed = true;
       entry.underlying = null;
       entry.handle.attach(null);
-      this.emit(entry.key, "failed", entry.attempts);
+      this.emit(entry.baseKey, "failed", entry.attempts, entry);
       return;
     }
     entry.attempts += 1;
     entry.reconnects += 1;
     entry.underlying = null;
     entry.handle.attach(null);
-    this.emit(entry.key, "reconnecting", entry.attempts);
+    this.emit(entry.baseKey, "reconnecting", entry.attempts, entry);
     // Backoff 250ms*2^(n-1) capped at 5s (ARCHITECTURE.md §2.4).
     const delay = Math.min(
       RECONNECT_BASE_MS * 2 ** (entry.attempts - 1),
@@ -475,18 +580,14 @@ export class SessionManager {
   }
 
   private armIdle(entry: SessionEntry): void {
+    if (entry.draining) return;
     this.clearIdle(entry);
     // Zero refs but a reconnect in flight: cancel it — no provider sessions
     // while nobody listens. A later acquire reopens on demand.
     this.clearReconnect(entry);
     entry.idleTimer = armTimer(this.idleCloseMs, () => {
       entry.idleTimer = null;
-      if (this.entries.get(entry.key) !== entry) return;
-      this.clearReconnect(entry);
-      entry.generation += 1;
-      entry.underlying?.close();
-      entry.handle.attach(null);
-      this.entries.delete(entry.key);
+      this.retire(entry);
     });
   }
 
@@ -504,10 +605,14 @@ export class SessionManager {
     return this.entries.get(entry.key) === entry && entry.generation === gen;
   }
 
-  private emit(pair: string, status: SessionStatus, attempt: number): void {
+  private emit(
+    pair: string,
+    status: SessionStatus,
+    attempt: number,
+    entry?: SessionEntry,
+  ): void {
     // Track the current status for snapshotSessions() (T-020). The cap-path
     // "degraded" emit has no entry (stateless muted handle) — nothing to track.
-    const entry = this.entries.get(pair);
     if (entry !== undefined) entry.status = status;
     this.onSessionStatus?.(pair, status, attempt);
   }
