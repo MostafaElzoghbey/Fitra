@@ -251,8 +251,8 @@ export interface UiStrings {
 
 const STRINGS: Record<SupportedUiLang, UiStrings> = {
   ar: {
-    appTitle: "فترا",
-    appTagline: "مختبر الترجمة الفورية",
+    appTitle: "فطرة",
+    appTagline: "منصة تداول العلم",
     uiLangLabel: "لغة الواجهة",
     navHome: "الرئيسية",
     navCreate: "إنشاء صف",
@@ -317,7 +317,7 @@ const STRINGS: Record<SupportedUiLang, UiStrings> = {
     consentFreeTier:
       "في النسخة التجريبية المجانية قد تستخدم Google المحتوى المُرسل لتحسين منتجاتها، وقد يطّلع عليه مراجعون بشريون. النسخة الإنتاجية تستخدم الاشتراك المدفوع الذي لا يُستخدم فيه المحتوى للتدريب.",
     consentNoRecording:
-      "لا تُسجَّل أي محادثة صوتية من طرف فترا: لا في الخادم ولا في المتصفح.",
+      "لا تُسجَّل أي محادثة صوتية من طرف فطرة: لا في الخادم ولا في المتصفح.",
     consentLeave:
       "يمكنك مغادرة الصف في أي وقت بزر واحد، دون أي أثر يُحفظ.",
     consentMinors:
