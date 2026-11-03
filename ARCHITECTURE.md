@@ -1,6 +1,6 @@
 # Fitra — Architecture
 
-Spec-only. All external facts cite the doc URL next to the claim.
+Architecture of the implemented M0/M0.6 system. All external facts cite the doc URL next to the claim.
 
 ## 1. Components
 
@@ -100,7 +100,7 @@ sequenceDiagram
     Note over L: demuxed by downlink speaker index,<br/>parallel jitter queues, browser mixes
 ```
 
-### 2.4 Translation session failure
+### 2.5 Translation session failure
 
 ```mermaid
 sequenceDiagram
@@ -120,17 +120,19 @@ sequenceDiagram
 ## 3. Durable Object internals
 
 - **Class**: `ClassRoom`, `new_sqlite_classes` (SQLite backend is mandatory on
-  Free; source: pricing URL above). SQLite used ONLY for room config +
-  membership + resumption handles — never audio.
+  Free; source: pricing URL above). SQLite is used ONLY for room config,
+  membership, and the force-mute latch — never audio; resumption handles stay
+  in session memory.
 - **Routing**: one instance per room via `idFromName(roomCode)`, so the room code
   in `state.id.name` is the room identity and the DO is authoritative for
   membership (SPEC FR-004, FR-050).
-- **Schema** (T-006): `room_config` (single row: code, `created_at_ms`,
-  `next_index`, `next_session`, `teacher_lang`, `expired_at_ms`) and
-  `membership` (`participant_id` PK, `participant_index` UNIQUE, `session`,
-  `role`, `name`, `lang`). Writes happen only on join and leave — admission,
-  index allocation and roster rendering are the only SQL in the hot path, and a
-  re-sent roster is a `SELECT`, not a write (AGENTS.md rule 2).
+- **Schema**: `room_config` (single row: code, `created_at_ms`, `next_index`,
+  `next_session`, `teacher_lang`, `expired_at_ms`), `membership`
+  (`participant_id` PK, `participant_index` UNIQUE, `session`, `role`, `name`,
+  `lang`), and `mic_control` (single row: `mute_all_active`, `forced_muted`
+  JSON — the hibernation-safe force-mute latch; `micOpen` stays memory-only).
+  Writes happen only on join, leave, and mute-state changes; a re-sent roster is
+  a `SELECT`, not a write (AGENTS.md rule 2).
 - **Admission** is measured against LIVE sockets (`getWebSockets()` +
   `deserializeAttachment()`), so a stale membership row can never lock a seat;
   the roster itself is rendered from SQLite so it survives hibernation. Rejected
@@ -167,7 +169,7 @@ sequenceDiagram
 ## 4. TranslationProvider interface
 
 ```ts
-// Lives in worker/src/translation/provider.ts (M0 task). Gemini and Fake
+// Lives in worker/src/translation/provider.ts. Gemini and Fake
 // implement it; room code depends only on this.
 export type Lang = string; // BCP-47, validated against config allowlist
 
@@ -212,7 +214,7 @@ export interface TranslationProvider {
   PROTOCOL.md section 3.1); membership language
   lookups are cached until any membership
   row changes (previously 2 SQLite reads/frame at 10 frames/s speaker).
-- **Gemini provider** (documented parameters; wire details to verify in OQ-01):
+- **Gemini provider** (probe-confirmed wire shape: OQ-01/OQ-02):
   model `gemini-3.5-live-translate-preview`; setup carries
   `responseModalities: ["AUDIO"]`,
   `translationConfig: { targetLanguageCode, echoTargetLanguage: false }`
@@ -275,10 +277,12 @@ in one burst and cutting the horizon truncated the tail (T-026).
 {
   "name": "fitra-lab",
   "main": "worker/src/index.ts",
+  "compatibility_date": "2026-10-14",
   "assets": { "directory": "web/dist" },
   "durable_objects": { "bindings": [{ "name": "CLASSROOM", "class_name": "ClassRoom" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ClassRoom"] }],
   "vars": {
+    "TRANSLATION_PROVIDER": "gemini",
     "SUPPORTED_LANGUAGES": ["ar", "en", "fr", "es"],
     "MAX_STUDENTS": 30, "MAX_TRANSLATION_SESSIONS": 8,
     "SESSION_IDLE_CLOSE_S": 60, "MAX_ROOM_MINUTES": 120,
@@ -309,10 +313,11 @@ in one burst and cutting the horizon truncated the tail (T-026).
 ## 7. Browser capture pipeline (T-010)
 
 ```
-getUserStream(mono, 16 kHz ideal, EC/NS/AGC on, exact deviceId)
+getUserStream(mono, 16 kHz ideal, EC/NS/AGC on, voiceIsolation requested, exact deviceId)
   → AudioContext({ sampleRate: 16 000, latencyHint: "interactive" })
   → MediaStreamAudioSourceNode
   → AudioWorkletNode("fitra-capture")            web/public/worklets/capture.worklet.js
+  → 90 Hz high-pass (in the worklet)             removes rumble/handling noise
   → { type: "frame", pcm: ArrayBuffer } ×10/s    (100 ms = 1 600 samples = 3 200 B)
   → AudioFrameSender → encodeAudioFrame(type 0x01) → ws.send(binary)
 ```
@@ -326,7 +331,7 @@ getUserStream(mono, 16 kHz ideal, EC/NS/AGC on, exact deviceId)
 | Backpressure | Frame **dropped** (never queued) while `ws.bufferedAmount` > 64 KiB (~2 s of stall at 10 frames/s); queueing would only add latency. `framesSent` / `framesDropped` feed the T-012 metrics panel. |
 | Speaker index | Assigned by the server `welcome` (`participantIndex`), pushed in with `setSpeakerIndex()` — the client never picks its own index. |
 | Playback | The mic is never connected to `ctx.destination`; capture has no output node at all. Playback lives in `web/src/audio/playback.ts` (T-011). |
-| Devices | `enumerateDevices()` **after** permission (labels/ids are empty before it); exact `deviceId` match; `devicechange` on the active input falls back to the default one and reports `mic-device-lost`; `getSettings()` verifies EC/NS/AGC actually applied. |
+| Devices | `enumerateDevices()` **after** permission (labels/ids are empty before it); exact `deviceId` match; `devicechange` on the active input falls back to the default one and reports `mic-device-lost`; `getSettings()` verifies EC/NS/AGC actually applied. `voiceIsolation` is requested where supported and dropped on `OverconstrainedError`/`TypeError`; if EC/NS/AGC are lost, capture reports `mic-processing-degraded` and the UI shows `micProcessingHint` (OQ-17). |
 | Test seam | `?injectAudio=1` skips the microphone and feeds synthetic 16 kHz PCM to the sender, publishing `window.__fitraCapture` counters — E2E never depends on Chromium fake-audio flags (OQ-10, T-016). |
 
 Pure helpers (`framePack`, `downsampleLinear`, sender framing) live in

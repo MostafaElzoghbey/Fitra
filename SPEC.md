@@ -1,7 +1,7 @@
 # Fitra — Live Speech-to-Speech Classroom Translation: Specification
 
-> SPEC-ONLY. No application code exists yet. This document is normative for all
-> milestones. `docs/OPEN-QUESTIONS.md` lists everything not yet verified.
+> Normative specification for all milestones. M0 and M0.6 are implemented;
+> `docs/OPEN-QUESTIONS.md` records the assumptions still awaiting measurement.
 
 ## 1. Product overview
 

@@ -7,7 +7,7 @@ failure injection). Real Gemini only in the opt-in manual smoke test.
 
 | Target | Cases | Proves |
 |---|---|---|
-| Mic-policy machine (`worker/src/mic.ts`) | every row of `docs/MIC-CONTROL.md`: mic-open/close, force-mute refuses mic-open, mute cuts an open mic (flush + release), mute-all + late joiner inherits, unmute never auto-opens, unknown pid → `mute-absent`, double-teacher, disconnect mid-speech | FR-010–016 |
+| Mic-policy machine (`worker/src/mic.ts`) | every row of `docs/MIC-CONTROL.md`: mic-open/close, force-mute refuses mic-open, mute cuts an open mic (flush + drain), mute-all + late joiner inherits, unmute never auto-opens, unknown pid → `mute-absent`, double-teacher, disconnect mid-speech | FR-010–016 |
 | SessionManager | lazy open, refcount share (2 listeners 1 session), idle-close, cap overflow protects teacher leg, reconnect backoff sequence | FR-020–025 |
 | Protocol codec | header encode/decode, seq wrap, oversize reject, bad version reject, JSON type guards | `docs/PROTOCOL.md` |
 | Join token | sign/verify, expiry, tamper reject, role binding, rejoin verify (`ignoreExpiry`) re-signing the SAME pid | FR-003/050 |
@@ -56,8 +56,9 @@ target-language sockets (already covered in fanout, re-asserted here).
 ## 3. E2E (Playwright, Chromium, no Gemini)
 
 - 3 contexts: teacher (ar) + students (en, fr), `FakeTranslationProvider`.
-- Fake media flags: `--use-fake-device-for-media-stream`,
-  `--use-file-for-fake-audio-capture=<wav>` (verify or correct in OQ-10).
+- Audio seam: `?injectAudio=1` feeds synthetic PCM to `AudioFrameSender`
+  (OQ-10 resolved); Chromium fake-device flags are backup for the real-mic
+  path only, and no WAV file is used.
 - Flow: create → join ×2 → teacher speaks (WAV in) → students receive audio
   (assert `audioFramesReceived > 0` via console/panel hooks); student opens
   mic → speaks → teacher receives — while the teacher mic is ALSO open
@@ -141,7 +142,8 @@ reconnect storm after forced restart. Soak variant (30 min, Gemini on) for OQ-05
 
 - [ ] Acceptance criteria in `TASKS.md` demonstrated (tabs/E2E/smoke as specified)
 - [ ] `tsc --noEmit` + unit + DO tests green; Playwright green (M0+)
-- [ ] `lsp_diagnostics` clean on changed files
+- [ ] Typecheck clean on changed files (`lsp_diagnostics` when an LSP is
+  available, otherwise `tsc --noEmit`)
 - [ ] Metrics panel shows the release's new behavior working
 - [ ] Docs updated (`LIMITS.md` numbers corrected if measured otherwise)
 - [ ] No key in client bundle (`grep` for key names in `web/dist` in CI)

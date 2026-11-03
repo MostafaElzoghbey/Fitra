@@ -37,7 +37,7 @@ only; students keep talking to each other).
 |---|---|---|
 | `mic-open` | any | If `forcedMuted` → `error{mic-forced-muted}` to sender, mic stays closed. Else set `micOpen=true`, record the announced capture `epoch`, broadcast `mic-changed{pid,true}`, pre-warm this speaker's pipe set for that epoch (session-status flows before first frame). |
 | `mic-close` | any | If open: set `micOpen=false`, broadcast `mic-changed{pid,false}`, flush provider input (`audioStreamEnd`) and put this speaker's epoch sessions into **drain**: the translated tail keeps playing until 1.2 s of output silence (hard cap 4 s), then the sessions retire. If already closed: no-op. |
-| `mute{pid}` | teacher | Set target pid's `forcedMuted=true`. If their mic is open: cut it — `micOpen=false`, flush + release pipes, broadcast `mic-changed{pid,false}`. Broadcast full `roster` (forcedMuted flag visible). Unknown/absent student pid → `error{mute-absent}` to teacher, no change. |
+| `mute{pid}` | teacher | Set target pid's `forcedMuted=true`. If their mic is open: cut it — `micOpen=false`, flush + drain pipes, broadcast `mic-changed{pid,false}`. Broadcast full `roster` (forcedMuted flag visible). Unknown/absent student pid → `error{mute-absent}` to teacher, no change. |
 | `mute-all` | teacher | Every student: `forcedMuted=true`; open mics cut as above; `muteAllActive=true`. One `roster` broadcast + one `mic-changed{pid,false}` per participant that actually had an open mic. |
 | `unmute {pid}` | teacher | `forcedMuted=false`; `roster` broadcast. Does NOT open their mic — the student still decides. |
 | `unmute-all` | teacher | Clear `forcedMuted` for every student; `muteAllActive=false`; `roster` broadcast. |
@@ -61,15 +61,16 @@ only; students keep talking to each other).
 - **Concurrent speakers**: two students can both hold `micOpen=true`; each is
   a separate pipe keyed `${speakerIndex}:${src}->{tgt}`. Sessions shared per
   pipe across that speaker's listeners (one feed per frame exactly once).
-- **Sequence demuxing**: downlink `seq` is per (listener, speaker-pipe);
+- **Sequence demuxing**: downlink `seq` is per (listener, speaker-pipe, epoch);
   clients demultiplex by the downlink `speaker` index and run one jitter
   queue per source (no cross-pipe seq correlation).
 - **Caption turns**: keyed by speaker; a `mic-changed{pid,false}` is the turn
   boundary ONLY for pid's caption slots (PROTOCOL §3.1).
-- **Disconnect**: pipe release (flush + release) for that pid; `micOpen`
+- **Disconnect**: that speaker's pipes drain (flush + retire) and the departing
+  pid is released from every pipe they listened to; `micOpen`
   reset; `forcedMuted` row removed with the roster row; a rejoin starts
   unmuted (closed mic) and un-forced unless `muteAllActive`.
-- **Teacher disconnect**: teacher's pipes released; students unaffected;
+- **Teacher disconnect**: teacher's pipes drain (flush + retire); students unaffected;
   `muteAllActive` and flags retained; second-teacher join still rejected
   (`teacher-taken`, FR-004); teacher socket replacement uses the rejoin path
   (`teacher-rejoin` roster broadcast, never `teacher-taken`).
