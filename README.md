@@ -10,10 +10,8 @@
 [![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)](https://react.dev/)
 [![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white)](https://workers.cloudflare.com/)
 [![Durable Objects](https://img.shields.io/badge/Durable%20Objects-SQLite-F38020?logo=cloudflare&logoColor=white)](https://developers.cloudflare.com/durable-objects/)
-[![Gemini Live API](https://img.shields.io/badge/Gemini-Live%20Translate-4285F4?logo=google&logoColor=white)](https://ai.google.dev/gemini-api/docs/live-api/live-translate)
 [![Vitest](https://img.shields.io/badge/tested%20with-Vitest-6E9F18?logo=vitest&logoColor=white)](https://vitest.dev/)
 [![Playwright](https://img.shields.io/badge/E2E-Playwright-2EAD33?logo=playwright&logoColor=white)](https://playwright.dev/)
-[![RTL first](https://img.shields.io/badge/UI-RTL%20%C2%B7%20Arabic%20first-0F766E)](#internationalization)
 
 **Status:** M0 / M0.6 complete — the Translation Lab runs end to end on the Cloudflare free tier.
 
